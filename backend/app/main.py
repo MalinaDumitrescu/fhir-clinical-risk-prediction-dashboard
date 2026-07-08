@@ -6,7 +6,12 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.config import FEATURES_CSV, MODEL_PATH, METRICS_PATH
+from backend.app.config import (
+    FEATURES_CSV,
+    MODEL_PATH,
+    METRICS_PATH,
+    MODEL_COMPARISON_PATH,
+)
 from backend.app.features import build_feature_dataframe
 from backend.app.risk_assessment import (
     create_risk_assessment,
@@ -58,13 +63,43 @@ def get_risk_level(probability):
     return "high"
 
 
+def get_feature_importances_from_model(model):
+    """
+    Tries to get feature importances from different model types.
+
+    Works for:
+    - RandomForestClassifier
+    - ExtraTreesClassifier
+    - GradientBoostingClassifier
+    - XGBClassifier
+    - LGBMClassifier
+
+    For models like StackingClassifier where direct feature importance is not clean,
+    it returns None.
+    """
+    if hasattr(model, "feature_importances_"):
+        return model.feature_importances_
+
+    # VotingClassifier: average importances from base estimators when possible
+    if hasattr(model, "estimators_"):
+        importances_list = []
+
+        for estimator in model.estimators_:
+            if hasattr(estimator, "feature_importances_"):
+                importances_list.append(estimator.feature_importances_)
+
+        if importances_list:
+            return sum(importances_list) / len(importances_list)
+
+    return None
+
+
 def explain_prediction(model_artifact, patient_df):
     """
-    Simple explanation for V1.
+    Produces a simple feature-importance-based explanation.
 
-    This is not full SHAP yet.
-    It uses the random forest global feature importance and combines it with
-    the patient's available values.
+    This is not SHAP yet.
+    It is safe for multiple model families.
     """
     pipeline = model_artifact["pipeline"]
     feature_columns = model_artifact["feature_columns"]
@@ -84,7 +119,17 @@ def explain_prediction(model_artifact, patient_df):
     if hasattr(values, "toarray"):
         values = values.toarray()[0]
 
-    importances = model.feature_importances_
+    importances = get_feature_importances_from_model(model)
+
+    if importances is None:
+        return [
+            {
+                "feature": "Explanation unavailable",
+                "value": 0.0,
+                "importance": 0.0,
+                "score": 0.0,
+            }
+        ]
 
     explanations = []
 
@@ -216,3 +261,14 @@ def export_risk_assessment(patient_id: str):
     save_risk_assessment(risk_assessment)
 
     return risk_assessment
+
+@app.get("/models/comparison")
+def get_model_comparison():
+    if not MODEL_COMPARISON_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Model comparison file not found. Run advanced training first.",
+        )
+
+    with open(MODEL_COMPARISON_PATH, "r", encoding="utf-8") as file:
+        return json.load(file)

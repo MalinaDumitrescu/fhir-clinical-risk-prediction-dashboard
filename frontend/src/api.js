@@ -54,3 +54,13 @@ export async function getMetrics() {
 
   return response.json();
 }
+
+export async function getModelComparison() {
+  const response = await fetch(`${API_BASE}/models/comparison`);
+
+  if (!response.ok) {
+    throw new Error("Could not load model comparison");
+  }
+
+  return response.json();
+}

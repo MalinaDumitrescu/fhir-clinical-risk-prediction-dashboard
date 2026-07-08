@@ -5,6 +5,7 @@ import {
   getPrediction,
   exportRiskAssessment,
   getMetrics,
+  getModelComparison,
 } from "./api";
 
 function App() {
@@ -13,11 +14,13 @@ function App() {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [prediction, setPrediction] = useState(null);
   const [metrics, setMetrics] = useState(null);
+  const [modelComparison, setModelComparison] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     loadPatients();
     loadMetrics();
+    loadModelComparison();
   }, []);
 
   async function loadPatients() {
@@ -39,6 +42,15 @@ function App() {
       setMetrics(data);
     } catch (err) {
       console.log("Metrics not available yet.");
+    }
+  }
+
+  async function loadModelComparison() {
+    try {
+      const data = await getModelComparison();
+      setModelComparison(data);
+    } catch (err) {
+      console.log("Model comparison not available yet.");
     }
   }
 
@@ -93,7 +105,8 @@ function App() {
       <header>
         <h1>FHIR Clinical Risk Dashboard</h1>
         <p>
-          Educational prototype using MIMIC-IV-on-FHIR data and machine learning.
+          Educational prototype using MIMIC-IV-on-FHIR data, Optuna, boosting,
+          and ensemble models.
         </p>
       </header>
 
@@ -115,9 +128,7 @@ function App() {
             ))}
           </select>
 
-          <div className="small-info">
-            Loaded patients: {patients.length}
-          </div>
+          <div className="small-info">Loaded patients: {patients.length}</div>
         </section>
 
         <section className="panel">
@@ -130,18 +141,12 @@ function App() {
               <Info label="Patient ID" value={selectedPatient.patient_id} />
               <Info label="Gender" value={selectedPatient.gender} />
               <Info label="Age" value={selectedPatient.age} />
-              <Info
-                label="Conditions"
-                value={selectedPatient.condition_count}
-              />
+              <Info label="Conditions" value={selectedPatient.condition_count} />
               <Info
                 label="Medication events"
                 value={selectedPatient.medication_event_count}
               />
-              <Info
-                label="Procedures"
-                value={selectedPatient.procedure_count}
-              />
+              <Info label="Procedures" value={selectedPatient.procedure_count} />
               <Info
                 label="ICU LOS days"
                 value={Number(selectedPatient.icu_los_days || 0).toFixed(2)}
@@ -192,8 +197,8 @@ function App() {
                 <li key={index}>
                   <strong>{item.feature}</strong>
                   <br />
-                  value: {item.value.toFixed(3)} | importance:{" "}
-                  {item.importance.toFixed(4)}
+                  value: {Number(item.value).toFixed(3)} | importance:{" "}
+                  {Number(item.importance).toFixed(4)}
                 </li>
               ))}
             </ol>
@@ -207,13 +212,68 @@ function App() {
 
           {metrics && (
             <div className="grid">
+              <Info label="Best model" value={metrics.model_name || "unknown"} />
               <Info label="Accuracy" value={round(metrics.accuracy)} />
               <Info label="ROC-AUC" value={round(metrics.roc_auc)} />
               <Info
                 label="Average precision"
                 value={round(metrics.average_precision)}
               />
+              <Info
+                label="Balanced accuracy"
+                value={round(metrics.balanced_accuracy)}
+              />
+              <Info label="Recall" value={round(metrics.recall)} />
+              <Info label="F1" value={round(metrics.f1)} />
             </div>
+          )}
+        </section>
+
+        <section className="panel patient-list">
+          <h2>Model Comparison</h2>
+
+          {!modelComparison && (
+            <p>Run advanced training to see model comparison.</p>
+          )}
+
+          {modelComparison && (
+            <>
+              <p>
+                <strong>Best model:</strong> {modelComparison.best_model_name}
+              </p>
+
+              <p className="small-info">
+                Selection rule: {modelComparison.selection_metric}
+              </p>
+
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>ROC-AUC</th>
+                      <th>Avg Precision</th>
+                      <th>Balanced Acc.</th>
+                      <th>Recall</th>
+                      <th>F1</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {modelComparison.models.map((model) => (
+                      <tr key={model.model_name}>
+                        <td>{model.model_name}</td>
+                        <td>{round(model.roc_auc)}</td>
+                        <td>{round(model.average_precision)}</td>
+                        <td>{round(model.balanced_accuracy)}</td>
+                        <td>{round(model.recall)}</td>
+                        <td>{round(model.f1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </section>
       </main>
