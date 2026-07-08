@@ -11,7 +11,9 @@ from backend.app.config import (
     MODEL_PATH,
     METRICS_PATH,
     MODEL_COMPARISON_PATH,
+    MODEL_DETAILS_PATH,
 )
+# from backend.app.explainability import get_shap_explanation
 from backend.app.features import build_feature_dataframe
 from backend.app.risk_assessment import (
     create_risk_assessment,
@@ -22,7 +24,7 @@ from backend.app.risk_assessment import (
 app = FastAPI(
     title="FHIR Clinical Risk Dashboard API",
     description="Educational medical informatics prototype using FHIR data and ML.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -47,7 +49,7 @@ def load_model_artifact():
     if not MODEL_PATH.exists():
         raise HTTPException(
             status_code=500,
-            detail="Model not found. Run: python -m backend.app.train_model",
+            detail="Model not found. Run: python -m backend.app.train_production_models",
         )
 
     return joblib.load(MODEL_PATH)
@@ -61,100 +63,6 @@ def get_risk_level(probability):
         return "medium"
 
     return "high"
-
-
-def get_feature_importances_from_model(model):
-    """
-    Tries to get feature importances from different model types.
-
-    Works for:
-    - RandomForestClassifier
-    - ExtraTreesClassifier
-    - GradientBoostingClassifier
-    - XGBClassifier
-    - LGBMClassifier
-
-    For models like StackingClassifier where direct feature importance is not clean,
-    it returns None.
-    """
-    if hasattr(model, "feature_importances_"):
-        return model.feature_importances_
-
-    # VotingClassifier: average importances from base estimators when possible
-    if hasattr(model, "estimators_"):
-        importances_list = []
-
-        for estimator in model.estimators_:
-            if hasattr(estimator, "feature_importances_"):
-                importances_list.append(estimator.feature_importances_)
-
-        if importances_list:
-            return sum(importances_list) / len(importances_list)
-
-    return None
-
-
-def explain_prediction(model_artifact, patient_df):
-    """
-    Produces a simple feature-importance-based explanation.
-
-    This is not SHAP yet.
-    It is safe for multiple model families.
-    """
-    pipeline = model_artifact["pipeline"]
-    feature_columns = model_artifact["feature_columns"]
-
-    preprocessor = pipeline.named_steps["preprocessor"]
-    model = pipeline.named_steps["model"]
-
-    transformed = preprocessor.transform(patient_df[feature_columns])
-
-    try:
-        feature_names = preprocessor.get_feature_names_out()
-    except Exception:
-        feature_names = [f"feature_{i}" for i in range(transformed.shape[1])]
-
-    values = transformed[0]
-
-    if hasattr(values, "toarray"):
-        values = values.toarray()[0]
-
-    importances = get_feature_importances_from_model(model)
-
-    if importances is None:
-        return [
-            {
-                "feature": "Explanation unavailable",
-                "value": 0.0,
-                "importance": 0.0,
-                "score": 0.0,
-            }
-        ]
-
-    explanations = []
-
-    for name, value, importance in zip(feature_names, values, importances):
-        score = abs(float(value)) * float(importance)
-
-        if score > 0:
-            clean_name = name.replace("numeric__", "").replace("categorical__", "")
-
-            explanations.append(
-                {
-                    "feature": clean_name,
-                    "value": float(value),
-                    "importance": float(importance),
-                    "score": score,
-                }
-            )
-
-    explanations = sorted(
-        explanations,
-        key=lambda item: item["score"],
-        reverse=True,
-    )
-
-    return explanations[:5]
 
 
 @app.get("/")
@@ -177,11 +85,46 @@ def get_metrics():
     if not METRICS_PATH.exists():
         raise HTTPException(
             status_code=404,
-            detail="Metrics file not found. Train the model first.",
+            detail="Metrics file not found. Train the production model first.",
         )
 
-    with open(METRICS_PATH, "r", encoding="utf-8") as file:
+    with open(METRICS_path, "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+@app.get("/models/details")
+def get_model_details():
+    if MODEL_DETAILS_PATH.exists():
+        with open(MODEL_DETAILS_PATH, "r", encoding="utf-8") as file:
+            return json.load(file)
+
+    model_artifact = load_model_artifact()
+
+    return model_artifact.get("model_details", {})
+
+
+@app.get("/models/comparison")
+def get_model_comparison():
+    if not MODEL_COMPARISON_PATH.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Model comparison file not found. Run production training first.",
+        )
+
+    with open(MODEL_COMPARISON_PATH, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+@app.get("/models/curves")
+def get_model_curves():
+    metrics = get_metrics()
+
+    return {
+        "roc_curve": metrics.get("roc_curve", []),
+        "pr_curve": metrics.get("pr_curve", []),
+        "calibration_curve": metrics.get("calibration_curve", []),
+        "brier_score": metrics.get("brier_score"),
+    }
 
 
 @app.get("/patients")
@@ -228,18 +171,29 @@ def predict_patient(patient_id: str):
 
     model_artifact = load_model_artifact()
 
-    pipeline = model_artifact["pipeline"]
+    prediction_pipeline = model_artifact.get(
+        "prediction_pipeline",
+        model_artifact["pipeline"],
+    )
+
     feature_columns = model_artifact["feature_columns"]
 
     patient_features = patient[feature_columns]
 
-    probability = pipeline.predict_proba(patient_features)[0][1]
+    probability = prediction_pipeline.predict_proba(patient_features)[0][1]
     risk_level = get_risk_level(probability)
 
-    explanation = explain_prediction(model_artifact, patient)
+    # explanation = get_shap_explanation(
+    #     model_artifact=model_artifact,
+    #     patient_df=patient,
+    #     max_features=5,
+    # )
+    explanation = "SHAP explanations are currently unavailable."
 
     return {
         "patient_id": patient_id,
+        "model_name": model_artifact.get("model_name", "unknown"),
+        "calibrated": bool(model_artifact.get("calibrated", False)),
         "risk_probability": round(float(probability), 4),
         "risk_percent": round(float(probability) * 100, 2),
         "risk_level": risk_level,
@@ -252,23 +206,21 @@ def predict_patient(patient_id: str):
 def export_risk_assessment(patient_id: str):
     prediction = predict_patient(patient_id)
 
+    basis_refs = [
+        {
+            "reference": f"Patient/{patient_id}"
+        }
+    ]
+
     risk_assessment = create_risk_assessment(
         patient_id=patient_id,
         probability=prediction["risk_probability"],
         risk_level=prediction["risk_level"],
+        model_name=prediction["model_name"],
+        explanation=prediction["explanation"],
+        basis_refs=basis_refs,
     )
 
     save_risk_assessment(risk_assessment)
 
     return risk_assessment
-
-@app.get("/models/comparison")
-def get_model_comparison():
-    if not MODEL_COMPARISON_PATH.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Model comparison file not found. Run advanced training first.",
-        )
-
-    with open(MODEL_COMPARISON_PATH, "r", encoding="utf-8") as file:
-        return json.load(file)

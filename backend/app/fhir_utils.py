@@ -1,7 +1,6 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-
 
 def load_ndjson(file_path: Path):
     """
@@ -161,3 +160,64 @@ def days_between(start, end):
         return 0.0
 
     return days
+
+def get_event_time(resource):
+    """
+    Gets a clinically relevant event timestamp from common FHIR fields.
+
+    Used to prevent leakage:
+    if an event has no timestamp, we do not use it as a first-24h feature.
+    """
+    direct_datetime_fields = [
+        "effectiveDateTime",
+        "authoredOn",
+        "recordedDate",
+        "issued",
+        "onsetDateTime",
+        "performedDateTime",
+        "occurrenceDateTime",
+        "whenHandedOver",
+        "whenPrepared",
+    ]
+
+    for field in direct_datetime_fields:
+        if field in resource:
+            parsed = parse_datetime(resource.get(field))
+            if parsed:
+                return parsed
+
+    period_fields = [
+        "effectivePeriod",
+        "performedPeriod",
+        "period",
+        "validityPeriod",
+    ]
+
+    for field in period_fields:
+        period = resource.get(field)
+
+        if isinstance(period, dict):
+            parsed = parse_datetime(period.get("start"))
+
+            if parsed:
+                return parsed
+
+    return None
+
+
+def is_within_first_24h(patient_id, event_time, patient_first_start):
+    """
+    Returns True only if the event is known to be inside the first 24h.
+    Missing timestamps are treated as unsafe and excluded.
+    """
+    if event_time is None:
+        return False
+
+    first_start = patient_first_start.get(patient_id)
+
+    if first_start is None:
+        return False
+
+    first_end = first_start + timedelta(hours=24)
+
+    return first_start <= event_time <= first_end

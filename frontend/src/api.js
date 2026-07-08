@@ -64,3 +64,13 @@ export async function getModelComparison() {
 
   return response.json();
 }
+
+export async function getModelDetails() {
+  const response = await fetch(`${API_BASE}/models/details`);
+
+  if (!response.ok) {
+    throw new Error("Could not load model details");
+  }
+
+  return response.json();
+}

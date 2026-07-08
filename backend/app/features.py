@@ -14,9 +14,13 @@ from backend.app.fhir_utils import (
     get_observation_time,
     get_numeric_value,
     get_observation_display,
+    get_event_time,
     parse_datetime,
     days_between,
 )
+
+
+PREDICTION_WINDOW_HOURS = 24
 
 
 OBSERVATION_KEYWORDS = {
@@ -37,9 +41,6 @@ OBSERVATION_KEYWORDS = {
 
 
 def match_observation_feature(display_name):
-    """
-    Maps raw FHIR Observation names to simple ML feature names.
-    """
     display_name = display_name.lower()
 
     for feature_name, keywords in OBSERVATION_KEYWORDS.items():
@@ -48,6 +49,20 @@ def match_observation_feature(display_name):
                 return feature_name
 
     return None
+
+
+def is_within_prediction_window(patient_id, event_time, patient_first_start):
+    if event_time is None:
+        return False
+
+    first_start = patient_first_start.get(patient_id)
+
+    if first_start is None:
+        return False
+
+    first_end = first_start + timedelta(hours=PREDICTION_WINDOW_HOURS)
+
+    return first_start <= event_time <= first_end
 
 
 def build_patient_base():
@@ -66,10 +81,14 @@ def build_patient_base():
             "gender": patient.get("gender", "unknown"),
             "birth_date": patient.get("birthDate"),
             "deceased": 1 if patient.get("deceasedDateTime") else 0,
+
+            # First-24h features only
             "condition_count": 0,
             "medication_event_count": 0,
             "procedure_count": 0,
             "encounter_count": 0,
+
+            # Outcomes / descriptive variables
             "icu_los_days": 0.0,
             "hospital_los_days": 0.0,
         }
@@ -78,12 +97,6 @@ def build_patient_base():
 
 
 def build_encounter_maps(patient_rows):
-    """
-    Creates:
-    - encounter_id -> patient_id
-    - patient_id -> first encounter start
-    - patient_id -> ICU length of stay
-    """
     encounter_to_patient = {}
     patient_first_start = {}
 
@@ -97,7 +110,6 @@ def build_encounter_maps(patient_rows):
 
         for encounter in encounters:
             encounter_id = encounter.get("id")
-
             subject = encounter.get("subject", {})
             patient_id = get_reference_id(subject.get("reference"))
 
@@ -134,7 +146,6 @@ def add_age(patient_rows, patient_first_start):
     for patient_id, row in patient_rows.items():
         birth_date = row.get("birth_date")
         birth_dt = parse_datetime(birth_date)
-
         first_start = patient_first_start.get(patient_id)
 
         if birth_dt and first_start:
@@ -144,17 +155,22 @@ def add_age(patient_rows, patient_first_start):
             row["age"] = None
 
 
-def count_conditions(patient_rows):
+def count_conditions_24h(patient_rows, patient_first_start):
     conditions = load_ndjson(DATA_DIR / "Condition.ndjson")
 
     for condition in conditions:
         patient_id = get_subject_patient_id(condition)
 
-        if patient_id in patient_rows:
+        if patient_id not in patient_rows:
+            continue
+
+        event_time = get_event_time(condition)
+
+        if is_within_prediction_window(patient_id, event_time, patient_first_start):
             patient_rows[patient_id]["condition_count"] += 1
 
 
-def count_medications(patient_rows):
+def count_medications_24h(patient_rows, patient_first_start):
     medication_files = [
         DATA_DIR / "MedicationRequest.ndjson",
         DATA_DIR / "MedicationAdministration.ndjson",
@@ -168,11 +184,16 @@ def count_medications(patient_rows):
         for resource in resources:
             patient_id = get_subject_patient_id(resource)
 
-            if patient_id in patient_rows:
+            if patient_id not in patient_rows:
+                continue
+
+            event_time = get_event_time(resource)
+
+            if is_within_prediction_window(patient_id, event_time, patient_first_start):
                 patient_rows[patient_id]["medication_event_count"] += 1
 
 
-def count_procedures(patient_rows):
+def count_procedures_24h(patient_rows, patient_first_start):
     procedure_files = [
         DATA_DIR / "Procedure.ndjson",
         DATA_DIR / "ProcedureICU.ndjson",
@@ -184,17 +205,16 @@ def count_procedures(patient_rows):
         for resource in resources:
             patient_id = get_subject_patient_id(resource)
 
-            if patient_id in patient_rows:
+            if patient_id not in patient_rows:
+                continue
+
+            event_time = get_event_time(resource)
+
+            if is_within_prediction_window(patient_id, event_time, patient_first_start):
                 patient_rows[patient_id]["procedure_count"] += 1
 
 
-def add_observation_features(patient_rows, encounter_to_patient, patient_first_start):
-    """
-    Adds first-24h observation features.
-
-    For every patient, we calculate the mean value of selected observations:
-    heart rate, respiratory rate, glucose, creatinine, etc.
-    """
+def add_observation_features_24h(patient_rows, encounter_to_patient, patient_first_start):
     observation_values = defaultdict(lambda: defaultdict(list))
 
     observation_files = [
@@ -229,14 +249,9 @@ def add_observation_features(patient_rows, encounter_to_patient, patient_first_s
                 continue
 
             obs_time = get_observation_time(observation)
-            first_start = patient_first_start.get(patient_id)
 
-            # Keep only measurements from the first 24 hours when possible.
-            if obs_time and first_start:
-                first_end = first_start + timedelta(hours=24)
-
-                if obs_time < first_start or obs_time > first_end:
-                    continue
+            if not is_within_prediction_window(patient_id, obs_time, patient_first_start):
+                continue
 
             observation_values[patient_id][feature_name].append(value)
 
@@ -249,13 +264,6 @@ def add_observation_features(patient_rows, encounter_to_patient, patient_first_s
 
 
 def add_target(df):
-    """
-    Target: long ICU stay.
-
-    For a real thesis, use a fixed clinical threshold such as >= 3 or >= 7 days.
-    For the small demo dataset, if the 3-day target creates only one class,
-    we fall back to a median split so that the ML pipeline can run.
-    """
     df["target_long_icu_stay"] = (df["icu_los_days"] >= 3.0).astype(int)
 
     if df["target_long_icu_stay"].nunique() < 2:
@@ -276,10 +284,10 @@ def build_feature_dataframe():
     encounter_to_patient, patient_first_start = build_encounter_maps(patient_rows)
 
     add_age(patient_rows, patient_first_start)
-    count_conditions(patient_rows)
-    count_medications(patient_rows)
-    count_procedures(patient_rows)
-    add_observation_features(patient_rows, encounter_to_patient, patient_first_start)
+    count_conditions_24h(patient_rows, patient_first_start)
+    count_medications_24h(patient_rows, patient_first_start)
+    count_procedures_24h(patient_rows, patient_first_start)
+    add_observation_features_24h(patient_rows, encounter_to_patient, patient_first_start)
 
     df = pd.DataFrame(list(patient_rows.values()))
 
@@ -293,7 +301,7 @@ def main():
 
     df.to_csv(FEATURES_CSV, index=False)
 
-    print(f"Saved features to: {FEATURES_CSV}")
+    print(f"Saved leakage-safe features to: {FEATURES_CSV}")
     print()
     print("Dataset shape:")
     print(df.shape)

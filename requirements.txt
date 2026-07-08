@@ -10,3 +10,7 @@ matplotlib
 optuna
 xgboost
 lightgbm
+shap
+mlflow
+pytest
+httpx
