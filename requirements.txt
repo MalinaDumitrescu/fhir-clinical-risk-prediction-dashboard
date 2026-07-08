@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pandas
+numpy
+scikit-learn
+joblib
+python-dateutil
+jupyter
+matplotlib
+optuna
+xgboost
+lightgbm

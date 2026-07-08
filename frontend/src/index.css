@@ -1,0 +1,155 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f6f8;
+  color: #1f2937;
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+header {
+  margin-bottom: 24px;
+}
+
+header h1 {
+  margin-bottom: 8px;
+}
+
+header p {
+  margin: 0;
+  color: #6b7280;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.panel {
+  background: white;
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+.patient-list {
+  grid-column: span 2;
+}
+
+select {
+  width: 100%;
+  padding: 10px;
+  font-size: 15px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.info-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.info-card span {
+  display: block;
+  color: #6b7280;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.info-card strong {
+  font-size: 18px;
+}
+
+.risk-box {
+  padding: 24px;
+  border-radius: 14px;
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.risk-percent {
+  font-size: 42px;
+  font-weight: bold;
+}
+
+.risk-label {
+  font-size: 16px;
+  font-weight: bold;
+}
+
+.risk-low {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.risk-medium {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.risk-high {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+button {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #1d4ed8;
+}
+
+.warning {
+  color: #b45309;
+  font-size: 14px;
+}
+
+.error {
+  background: #fee2e2;
+  color: #991b1b;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 18px;
+}
+
+.small-info {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+ol li {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 800px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+
+  .patient-list {
+    grid-column: span 1;
+  }
+}
