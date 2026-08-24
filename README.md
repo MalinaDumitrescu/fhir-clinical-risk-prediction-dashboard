@@ -507,7 +507,7 @@ This project is part of the healthcare-related-projects repository. For question
 
 ---
 
-## ⚠️ Clinical and Ethical Considerations
+## Clinical and Ethical Considerations
 
 **This system is for educational purposes only.**
 
