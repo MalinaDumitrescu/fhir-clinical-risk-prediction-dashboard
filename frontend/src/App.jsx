@@ -7,6 +7,8 @@ import {
   getMetrics,
   getModelComparison,
   getModelDetails,
+  getRiskAssessments,
+  getRiskAssessmentsDownloadUrl,
 } from "./api";
 
 function App() {
@@ -17,14 +19,20 @@ function App() {
   const [metrics, setMetrics] = useState(null);
   const [modelComparison, setModelComparison] = useState(null);
   const [modelDetails, setModelDetails] = useState(null);
+  const [riskAssessments, setRiskAssessments] = useState([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    loadInitialData();
+  }, []);
+
+  async function loadInitialData() {
     loadPatients();
     loadMetrics();
     loadModelComparison();
     loadModelDetails();
-  }, []);
+    loadRiskAssessments();
+  }
 
   async function loadPatients() {
     try {
@@ -66,6 +74,15 @@ function App() {
     }
   }
 
+  async function loadRiskAssessments() {
+    try {
+      const data = await getRiskAssessments();
+      setRiskAssessments(data);
+    } catch (err) {
+      console.log("Risk assessments not available yet.");
+    }
+  }
+
   useEffect(() => {
     if (selectedPatientId) {
       loadSelectedPatient(selectedPatientId);
@@ -95,6 +112,7 @@ function App() {
     try {
       const data = await exportRiskAssessment(selectedPatientId);
       alert(`RiskAssessment exported: ${data.id}`);
+      loadRiskAssessments();
     } catch (err) {
       setError(err.message);
     }
@@ -107,237 +125,477 @@ function App() {
   }
 
   return (
-    <div className="app">
-      <header>
-        <h1>FHIR Clinical Risk Dashboard</h1>
-        <p>
-          Leakage-safe first-24h FHIR features, Optuna tuning, calibrated risk
-          scores, SHAP explanations, and FHIR RiskAssessment export.
-        </p>
-      </header>
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">+</div>
+          <div>
+            <div className="brand-name">MEDREPAIR</div>
+            <div className="brand-subtitle">Clinical Intelligence</div>
+          </div>
+        </div>
 
-      {error && <div className="error">{error}</div>}
+        <nav className="sidebar-nav" aria-label="Dashboard sections">
+          <a className="nav-item active" href="#overview">
+            <span className="nav-icon">⌂</span>
+            Overview
+          </a>
+          <a className="nav-item" href="#patient">
+            <span className="nav-icon">✚</span>
+            Patient
+          </a>
+          <a className="nav-item" href="#risk">
+            <span className="nav-icon">◒</span>
+            Risk Analysis
+          </a>
+          <a className="nav-item" href="#performance">
+            <span className="nav-icon">⌁</span>
+            Model Performance
+          </a>
+          <a className="nav-item" href="#exports">
+            <span className="nav-icon">⇩</span>
+            FHIR Exports
+          </a>
+        </nav>
 
-      <main>
-        <section className="panel patient-list">
-          <h2>Patients</h2>
+        <div className="sidebar-footer">
+          <div className="system-status">
+            <span className="status-dot"></span>
+            Clinical service online
+          </div>
+          <div className="sidebar-note">
+            Decision-support prototype
+          </div>
+        </div>
+      </aside>
 
-          <select
-            value={selectedPatientId || ""}
-            onChange={(event) => setSelectedPatientId(event.target.value)}
-          >
-            {patients.map((patient) => (
-              <option key={patient.patient_id} value={patient.patient_id}>
-                {patient.patient_id} | age {patient.age || "unknown"} |{" "}
-                {patient.gender}
-              </option>
-            ))}
-          </select>
+      <div className="workspace">
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">Clinical Decision Support</div>
+            <h1>FHIR Clinical Risk Dashboard</h1>
+            <p>
+              First-24h clinical risk estimation with calibrated predictions,
+              explainability, and interoperable FHIR export.
+            </p>
+          </div>
 
-          <div className="small-info">Loaded patients: {patients.length}</div>
-        </section>
+          <div className="topbar-status">
+            <span className="status-dot"></span>
+            System operational
+          </div>
+        </header>
 
-        <section className="panel">
-          <h2>Patient Summary</h2>
+        {error && (
+          <div className="error" role="alert">
+            <strong>System message:</strong> {error}
+          </div>
+        )}
 
-          {!selectedPatient && <p>No patient selected.</p>}
-
-          {selectedPatient && (
-            <div className="grid">
-              <Info label="Patient ID" value={selectedPatient.patient_id} />
-              <Info label="Gender" value={selectedPatient.gender} />
-              <Info label="Age" value={selectedPatient.age} />
-              <Info label="Conditions 24h" value={selectedPatient.condition_count} />
-              <Info
-                label="Medication events 24h"
-                value={selectedPatient.medication_event_count}
-              />
-              <Info label="Procedures 24h" value={selectedPatient.procedure_count} />
-              <Info
-                label="ICU LOS days"
-                value={Number(selectedPatient.icu_los_days || 0).toFixed(2)}
-              />
-              <Info
-                label="Target: long ICU stay"
-                value={selectedPatient.target_long_icu_stay}
-              />
+        <main id="overview" className="dashboard">
+          <section className="panel patient-selector" id="patient">
+            <div className="panel-heading">
+              <div>
+                <div className="section-kicker">Patient workspace</div>
+                <h2>Select Patient</h2>
+              </div>
+              <div className="patient-count">
+                <span>{patients.length}</span>
+                patients loaded
+              </div>
             </div>
-          )}
-        </section>
 
-        <section className="panel">
-          <h2>Risk Prediction</h2>
-
-          {!prediction && <p>No prediction available.</p>}
-
-          {prediction && (
-            <>
-              <div className={`risk-box ${getRiskClass(prediction.risk_level)}`}>
-                <div className="risk-percent">{prediction.risk_percent}%</div>
-                <div className="risk-label">
-                  {prediction.risk_level.toUpperCase()} RISK
-                </div>
-              </div>
-
-              <div className="small-info">
-                Model: {prediction.model_name} | calibrated:{" "}
-                {String(prediction.calibrated)}
-              </div>
-
-              <p className="warning">{prediction.warning}</p>
-
-              <button onClick={handleExportRiskAssessment}>
-                Export FHIR RiskAssessment
-              </button>
-            </>
-          )}
-        </section>
-
-        <section className="panel">
-          <h2>SHAP Explanation</h2>
-
-          {!prediction && <p>No explanation available.</p>}
-
-          {prediction && prediction.explanation.length > 0 && (
-            <ol>
-              {prediction.explanation.map((item, index) => (
-                <li key={index}>
-                  <strong>{item.feature}</strong>
-                  <br />
-                  value: {round(item.value)} | SHAP: {round(item.shap_value)} |{" "}
-                  {item.impact}
-                </li>
+            <label className="field-label" htmlFor="patient-select">
+              Patient record
+            </label>
+            <select
+              id="patient-select"
+              value={selectedPatientId || ""}
+              onChange={(event) => setSelectedPatientId(event.target.value)}
+            >
+              {patients.map((patient) => (
+                <option key={patient.patient_id} value={patient.patient_id}>
+                  {patient.patient_id} | age {patient.age || "unknown"} |{" "}
+                  {patient.gender}
+                </option>
               ))}
-            </ol>
-          )}
-        </section>
+            </select>
 
-        <section className="panel">
-          <h2>Model Metrics</h2>
-
-          {!metrics && <p>Train the model to see metrics.</p>}
-
-          {metrics && (
-            <div className="grid">
-              <Info label="Best model" value={metrics.model_name || "unknown"} />
-              <Info label="Calibrated" value={String(metrics.calibrated)} />
-              <Info label="Accuracy" value={round(metrics.accuracy)} />
-              <Info label="ROC-AUC" value={round(metrics.roc_auc)} />
-              <Info label="Average precision" value={round(metrics.average_precision)} />
-              <Info label="Brier score" value={round(metrics.brier_score)} />
-              <Info label="Balanced accuracy" value={round(metrics.balanced_accuracy)} />
-              <Info label="Recall" value={round(metrics.recall)} />
-              <Info label="F1" value={round(metrics.f1)} />
+            <div className="small-info">
+              Choose a record to refresh the patient summary and clinical risk
+              estimate.
             </div>
-          )}
-        </section>
+          </section>
 
-        <section className="panel">
-          <h2>Model Details</h2>
-
-          {!modelDetails && <p>No model details available.</p>}
-
-          {modelDetails && (
-            <div className="details-list">
-              <p><strong>Target:</strong> {modelDetails.target}</p>
-              <p><strong>Target definition:</strong> {modelDetails.target_definition}</p>
-              <p><strong>Prediction window:</strong> first {modelDetails.prediction_window_hours}h</p>
-              <p><strong>Leakage policy:</strong> {modelDetails.leakage_policy}</p>
-              <p><strong>Patients:</strong> {modelDetails.n_patients}</p>
-              <p><strong>Features:</strong> {modelDetails.n_features}</p>
-              <p><strong>Training date:</strong> {modelDetails.training_date_utc}</p>
-            </div>
-          )}
-        </section>
-
-        <section className="panel patient-list">
-          <h2>Calibration and Performance Curves</h2>
-
-          {!metrics && <p>Train the model to see curves.</p>}
-
-          {metrics && (
-            <div className="charts-grid">
-              <CurveChart
-                title="ROC Curve"
-                data={metrics.roc_curve || []}
-                xKey="fpr"
-                yKey="tpr"
-                xLabel="False positive rate"
-                yLabel="True positive rate"
-              />
-
-              <CurveChart
-                title="Precision-Recall Curve"
-                data={metrics.pr_curve || []}
-                xKey="recall"
-                yKey="precision"
-                xLabel="Recall"
-                yLabel="Precision"
-              />
-
-              <CurveChart
-                title="Calibration Curve"
-                data={metrics.calibration_curve || []}
-                xKey="mean_predicted_probability"
-                yKey="fraction_of_positives"
-                xLabel="Predicted probability"
-                yLabel="Observed frequency"
-                diagonal
-              />
-            </div>
-          )}
-        </section>
-
-        <section className="panel patient-list">
-          <h2>Model Comparison</h2>
-
-          {!modelComparison && (
-            <p>Run production training to see model comparison.</p>
-          )}
-
-          {modelComparison && (
-            <>
-              <p>
-                <strong>Best model:</strong> {modelComparison.best_model_name}
-              </p>
-
-              <p className="small-info">
-                Selection rule: {modelComparison.selection_metric}
-              </p>
-
-              <div className="table-wrapper">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Model</th>
-                      <th>ROC-AUC</th>
-                      <th>Avg Precision</th>
-                      <th>Brier</th>
-                      <th>Balanced Acc.</th>
-                      <th>Recall</th>
-                      <th>F1</th>
-                    </tr>
-                  </thead>
-
-                  <tbody>
-                    {modelComparison.models.map((model) => (
-                      <tr key={model.model_name}>
-                        <td>{model.model_name}</td>
-                        <td>{round(model.roc_auc)}</td>
-                        <td>{round(model.average_precision)}</td>
-                        <td>{round(model.brier_score)}</td>
-                        <td>{round(model.balanced_accuracy)}</td>
-                        <td>{round(model.recall)}</td>
-                        <td>{round(model.f1)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <section className="panel patient-summary">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Patient record</div>
+                <h2>Clinical Summary</h2>
               </div>
-            </>
-          )}
-        </section>
-      </main>
+              {selectedPatient && (
+                <span className="record-badge">FHIR-linked record</span>
+              )}
+            </div>
+
+            {!selectedPatient && <p>No patient selected.</p>}
+
+            {selectedPatient && (
+              <>
+                <div className="patient-identity">
+                  <div className="avatar">
+                    {String(selectedPatient.gender || "?").charAt(0).toUpperCase()}
+                  </div>
+                  <div>
+                    <span className="identity-label">Patient ID</span>
+                    <strong>{selectedPatient.patient_id}</strong>
+                    <span className="identity-meta">
+                      {selectedPatient.age === null ||
+                      selectedPatient.age === undefined
+                        ? "Age unknown"
+                        : `${selectedPatient.age} years`}{" "}
+                      · {selectedPatient.gender || "gender unknown"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid clinical-grid">
+                  <Info
+                    label="Conditions 24h"
+                    value={selectedPatient.condition_count}
+                  />
+                  <Info
+                    label="Medication events 24h"
+                    value={selectedPatient.medication_event_count}
+                  />
+                  <Info
+                    label="Procedures 24h"
+                    value={selectedPatient.procedure_count}
+                  />
+                  <Info
+                    label="ICU LOS days"
+                    value={Number(selectedPatient.icu_los_days || 0).toFixed(2)}
+                  />
+                  <Info
+                    label="Target: long ICU stay"
+                    value={selectedPatient.target_long_icu_stay}
+                  />
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="panel risk-panel" id="risk">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Clinical prediction</div>
+                <h2>Risk Assessment</h2>
+              </div>
+              <span className="clinical-tag">CDS</span>
+            </div>
+
+            {!prediction && <p>No prediction available.</p>}
+
+            {prediction && (
+              <>
+                <div className={`risk-box ${getRiskClass(prediction.risk_level)}`}>
+                  <div className="risk-box-copy">
+                    <span className="risk-caption">Predicted probability</span>
+                    <div className="risk-percent">{prediction.risk_percent}%</div>
+                    <div className="risk-label">
+                      {prediction.risk_level.toUpperCase()} RISK
+                    </div>
+                  </div>
+
+                  <div className="risk-gauge" aria-hidden="true">
+                    <div className="risk-gauge-inner">
+                      {prediction.risk_percent}%
+                    </div>
+                  </div>
+                </div>
+
+                <div className="model-strip">
+                  <div>
+                    <span>Model</span>
+                    <strong>{prediction.model_name}</strong>
+                  </div>
+                  <div>
+                    <span>Calibrated</span>
+                    <strong>{String(prediction.calibrated)}</strong>
+                  </div>
+                </div>
+
+                {prediction.warning && (
+                  <p className="warning">
+                    <span>!</span>
+                    {prediction.warning}
+                  </p>
+                )}
+
+                <button
+                  className="primary-button"
+                  onClick={handleExportRiskAssessment}
+                >
+                  Export FHIR RiskAssessment
+                </button>
+              </>
+            )}
+          </section>
+
+          <section className="panel explanation-panel">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Explainable AI</div>
+                <h2>SHAP Explanation</h2>
+              </div>
+            </div>
+
+            {!prediction && <p>No explanation available.</p>}
+
+            {prediction &&
+              Array.isArray(prediction.explanation) &&
+              prediction.explanation.length > 0 && (
+                <ol className="shap-list">
+                  {prediction.explanation.map((item, index) => (
+                    <li key={index} className="shap-item">
+                      <div className="shap-rank">{index + 1}</div>
+                      <div className="shap-content">
+                        <strong>{item.feature}</strong>
+                        <div className="shap-values">
+                          <span>Value {round(item.value)}</span>
+                          <span>SHAP {round(item.shap_value)}</span>
+                          <span className="impact-pill">{item.impact}</span>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+
+            {prediction && typeof prediction.explanation === "string" && (
+              <p>{prediction.explanation}</p>
+            )}
+          </section>
+
+          <section className="panel metrics-panel" id="performance">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Validation</div>
+                <h2>Model Metrics</h2>
+              </div>
+              {metrics && (
+                <span className="model-badge">
+                  {metrics.model_name || "unknown"}
+                </span>
+              )}
+            </div>
+
+            {!metrics && <p>Train the model to see metrics.</p>}
+
+            {metrics && (
+              <div className="grid metrics-grid">
+                <Info label="Calibrated" value={String(metrics.calibrated)} />
+                <Info label="Accuracy" value={round(metrics.accuracy)} />
+                <Info label="ROC-AUC" value={round(metrics.roc_auc)} />
+                <Info
+                  label="Average precision"
+                  value={round(metrics.average_precision)}
+                />
+                <Info label="Brier score" value={round(metrics.brier_score)} />
+                <Info
+                  label="Balanced accuracy"
+                  value={round(metrics.balanced_accuracy)}
+                />
+                <Info label="Recall" value={round(metrics.recall)} />
+                <Info label="F1" value={round(metrics.f1)} />
+              </div>
+            )}
+          </section>
+
+          <section className="panel exports-panel" id="exports">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Interoperability</div>
+                <h2>Exported RiskAssessments</h2>
+              </div>
+              <a
+                className="secondary-button"
+                href={getRiskAssessmentsDownloadUrl()}
+                download
+              >
+                Download All
+              </a>
+            </div>
+
+            {riskAssessments.length === 0 && (
+              <p>No assessments exported yet.</p>
+            )}
+
+            {riskAssessments.length > 0 && (
+              <div className="assessment-list">
+                {riskAssessments.map((ra) => (
+                  <div className="assessment-row" key={ra.id}>
+                    <div className="document-icon">FHIR</div>
+                    <div>
+                      <strong>{ra.id}</strong>
+                      <span>{ra.subject.reference}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="panel model-details-panel">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Governance</div>
+                <h2>Model Details</h2>
+              </div>
+            </div>
+
+            {!modelDetails && <p>No model details available.</p>}
+
+            {modelDetails && (
+              <div className="details-list">
+                <DetailRow label="Target" value={modelDetails.target} />
+                <DetailRow
+                  label="Target definition"
+                  value={modelDetails.target_definition}
+                />
+                <DetailRow
+                  label="Prediction window"
+                  value={`first ${modelDetails.prediction_window_hours}h`}
+                />
+                <DetailRow
+                  label="Leakage policy"
+                  value={modelDetails.leakage_policy}
+                />
+                <DetailRow label="Patients" value={modelDetails.n_patients} />
+                <DetailRow label="Features" value={modelDetails.n_features} />
+                <DetailRow
+                  label="Training date"
+                  value={modelDetails.training_date_utc}
+                />
+
+                {modelDetails.best_optuna_trial && (
+                  <div className="optuna-highlight">
+                    <div>
+                      <span>Best Optuna trial</span>
+                      <strong>#{modelDetails.best_optuna_trial.number}</strong>
+                    </div>
+                    <div>
+                      <span>Best CV value</span>
+                      <strong>{round(modelDetails.best_optuna_trial.value)}</strong>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section className="panel charts-panel full-width">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Performance analysis</div>
+                <h2>Calibration and Performance Curves</h2>
+              </div>
+            </div>
+
+            {!metrics && <p>Train the model to see curves.</p>}
+
+            {metrics && (
+              <div className="charts-grid">
+                <CurveChart
+                  title="ROC Curve"
+                  data={metrics.roc_curve || []}
+                  xKey="fpr"
+                  yKey="tpr"
+                  xLabel="False positive rate"
+                  yLabel="True positive rate"
+                />
+
+                <CurveChart
+                  title="Precision-Recall Curve"
+                  data={metrics.pr_curve || []}
+                  xKey="recall"
+                  yKey="precision"
+                  xLabel="Recall"
+                  yLabel="Precision"
+                />
+
+                <CurveChart
+                  title="Calibration Curve"
+                  data={metrics.calibration_curve || []}
+                  xKey="mean_predicted_probability"
+                  yKey="fraction_of_positives"
+                  xLabel="Predicted probability"
+                  yLabel="Observed frequency"
+                  diagonal
+                />
+              </div>
+            )}
+          </section>
+
+          <section className="panel model-comparison-panel full-width">
+            <div className="panel-heading compact">
+              <div>
+                <div className="section-kicker">Benchmarking</div>
+                <h2>Model Comparison</h2>
+              </div>
+              {modelComparison && (
+                <span className="model-badge">
+                  Best: {modelComparison.best_model_name}
+                </span>
+              )}
+            </div>
+
+            {!modelComparison && (
+              <p>Run production training to see model comparison.</p>
+            )}
+
+            {modelComparison && (
+              <>
+                <p className="small-info comparison-rule">
+                  Selection rule: {modelComparison.selection_metric}
+                </p>
+
+                <div className="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>ROC-AUC</th>
+                        <th>Avg Precision</th>
+                        <th>Brier</th>
+                        <th>Balanced Acc.</th>
+                        <th>Recall</th>
+                        <th>F1</th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {modelComparison.models.map((model) => (
+                        <tr key={model.model_name}>
+                          <td>
+                            <strong>{model.model_name}</strong>
+                          </td>
+                          <td>{round(model.roc_auc)}</td>
+                          <td>{round(model.average_precision)}</td>
+                          <td>{round(model.brier_score)}</td>
+                          <td>{round(model.balanced_accuracy)}</td>
+                          <td>{round(model.recall)}</td>
+                          <td>{round(model.f1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </section>
+        </main>
+      </div>
     </div>
   );
 }
@@ -345,6 +603,15 @@ function App() {
 function Info({ label, value }) {
   return (
     <div className="info-card">
+      <span>{label}</span>
+      <strong>{value === null || value === undefined ? "unknown" : value}</strong>
+    </div>
+  );
+}
+
+function DetailRow({ label, value }) {
+  return (
+    <div className="detail-row">
       <span>{label}</span>
       <strong>{value === null || value === undefined ? "unknown" : value}</strong>
     </div>
@@ -384,8 +651,20 @@ function CurveChart({ title, data, xKey, yKey, xLabel, yLabel, diagonal }) {
 
       {safeData.length > 0 && (
         <svg viewBox={`0 0 ${width} ${height}`} className="curve-svg">
-          <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} className="axis" />
-          <line x1={padding} y1={padding} x2={padding} y2={height - padding} className="axis" />
+          <line
+            x1={padding}
+            y1={height - padding}
+            x2={width - padding}
+            y2={height - padding}
+            className="axis"
+          />
+          <line
+            x1={padding}
+            y1={padding}
+            x2={padding}
+            y2={height - padding}
+            className="axis"
+          />
 
           {diagonal && (
             <line
@@ -399,7 +678,12 @@ function CurveChart({ title, data, xKey, yKey, xLabel, yLabel, diagonal }) {
 
           <polyline points={points} className="curve-line" />
 
-          <text x={width / 2} y={height - 6} textAnchor="middle" className="axis-label">
+          <text
+            x={width / 2}
+            y={height - 6}
+            textAnchor="middle"
+            className="axis-label"
+          >
             {xLabel}
           </text>
 

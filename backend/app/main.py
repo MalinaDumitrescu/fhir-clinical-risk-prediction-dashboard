@@ -5,6 +5,7 @@ import pandas as pd
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from backend.app.config import (
     FEATURES_CSV,
@@ -12,8 +13,9 @@ from backend.app.config import (
     METRICS_PATH,
     MODEL_COMPARISON_PATH,
     MODEL_DETAILS_PATH,
+    RISK_ASSESSMENTS_PATH,
 )
-# from backend.app.explainability import get_shap_explanation
+from backend.app.explainability import get_shap_explanation
 from backend.app.features import build_feature_dataframe
 from backend.app.risk_assessment import (
     create_risk_assessment,
@@ -88,7 +90,7 @@ def get_metrics():
             detail="Metrics file not found. Train the production model first.",
         )
 
-    with open(METRICS_path, "r", encoding="utf-8") as file:
+    with open(METRICS_PATH, "r", encoding="utf-8") as file:
         return json.load(file)
 
 
@@ -183,12 +185,11 @@ def predict_patient(patient_id: str):
     probability = prediction_pipeline.predict_proba(patient_features)[0][1]
     risk_level = get_risk_level(probability)
 
-    # explanation = get_shap_explanation(
-    #     model_artifact=model_artifact,
-    #     patient_df=patient,
-    #     max_features=5,
-    # )
-    explanation = "SHAP explanations are currently unavailable."
+    explanation = get_shap_explanation(
+        model_artifact=model_artifact,
+        patient_df=patient,
+        max_features=5,
+    )
 
     return {
         "patient_id": patient_id,
@@ -224,3 +225,27 @@ def export_risk_assessment(patient_id: str):
     save_risk_assessment(risk_assessment)
 
     return risk_assessment
+
+
+@app.get("/risk-assessments")
+def get_risk_assessments():
+    if not RISK_ASSESSMENTS_PATH.exists():
+        return []
+
+    assessments = []
+    with open(RISK_ASSESSMENTS_PATH, "r", encoding="utf-8") as file:
+        for line in file:
+            if line.strip():
+                assessments.append(json.loads(line))
+    return assessments
+
+
+@app.get("/risk-assessments/download")
+def download_risk_assessments():
+    if not RISK_ASSESSMENTS_PATH.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+    return FileResponse(
+        path=RISK_ASSESSMENTS_PATH,
+        filename="RiskAssessment.ndjson",
+        media_type="application/x-ndjson",
+    )

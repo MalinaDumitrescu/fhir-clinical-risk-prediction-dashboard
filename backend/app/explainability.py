@@ -1,4 +1,5 @@
 import numpy as np
+import shap
 
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
@@ -126,3 +127,149 @@ def evaluate_binary_classifier(model, X_test, y_test):
         metrics.update(curves)
 
     return metrics
+
+
+def get_shap_explanation(model_artifact, patient_df, max_features=5):
+    """
+    Generate SHAP explanation for a single patient prediction.
+    Falls back to permutation importance if SHAP/feature importance fails.
+    """
+    try:
+        pipeline = model_artifact.get("prediction_pipeline", model_artifact.get("pipeline"))
+        feature_columns = model_artifact.get("feature_columns", [])
+        
+        if not feature_columns:
+            return "Feature columns not found in model artifact."
+        
+        # Extract the actual model from wrappers
+        model = pipeline
+        
+        # Unwrap CalibratedClassifierCV first
+        if hasattr(model, 'base_estimator'):
+            model = model.base_estimator
+        elif hasattr(model, 'estimator'):
+            model = model.estimator
+        
+        # Extract model from Pipeline
+        if hasattr(model, 'named_steps'):
+            model = model.named_steps.get("model", model)
+        
+        # If model is still a CalibratedClassifierCV, unwrap again
+        if hasattr(model, 'base_estimator'):
+            model = model.base_estimator
+        elif hasattr(model, 'estimator'):
+            model = model.estimator
+        
+        # Prepare features as numpy arrays
+        patient_features = patient_df[feature_columns].fillna(0)
+        
+        # Get preprocessor from pipeline if available
+        if hasattr(pipeline, 'named_steps') and 'preprocessor' in pipeline.named_steps:
+            preprocessor = pipeline.named_steps['preprocessor']
+            # Transform the features using the preprocessor
+            patient_features_transformed = preprocessor.transform(patient_features)
+        else:
+            patient_features_transformed = patient_features.values
+        
+        # Try TreeExplainer for tree-based models
+        if hasattr(model, 'feature_importances_'):
+            try:
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(patient_features_transformed)
+                
+                # Handle binary classification (shap_values might be a list)
+                if isinstance(shap_values, list):
+                    shap_values = shap_values[1]  # Get values for positive class
+                
+                # Ensure shap_values is 2D
+                if len(shap_values.shape) == 1:
+                    shap_values = shap_values.reshape(1, -1)
+                
+                # Extract top features
+                shap_values_flat = np.abs(shap_values[0])
+                n_features = min(len(feature_columns), len(shap_values_flat))
+                top_indices = np.argsort(shap_values_flat[:n_features])[-max_features:][::-1]
+                
+                explanation = []
+                for idx in top_indices:
+                    if idx < len(feature_columns):
+                        feature_name = feature_columns[idx]
+                        feature_value = patient_features.iloc[0, idx]
+                        shap_value = shap_values[0, idx]
+                        impact = "positive" if shap_value > 0 else "negative"
+                        
+                        explanation.append({
+                            "feature": feature_name,
+                            "value": safe_float(feature_value),
+                            "shap_value": safe_float(shap_value),
+                            "impact": impact,
+                        })
+                
+                return explanation if explanation else "No SHAP values computed."
+            except Exception as tree_err:
+                # TreeExplainer failed, try permutation importance
+                pass
+        
+        # Fallback: compute permutation importance
+        try:
+            from sklearn.inspection import permutation_importance
+            
+            # Get a dummy y for permutation importance (use all zeros/ones)
+            y_dummy = np.zeros(len(patient_features))
+            
+            result = permutation_importance(
+                pipeline,
+                patient_features,
+                y_dummy,
+                n_repeats=10,
+                random_state=42,
+                n_jobs=-1,
+            )
+            
+            importances = result.importances_mean
+            top_indices = np.argsort(importances)[-max_features:][::-1]
+            
+            explanation = []
+            for idx in top_indices:
+                if idx < len(feature_columns):
+                    feature_name = feature_columns[idx]
+                    feature_value = patient_features.iloc[0, idx]
+                    importance = importances[idx]
+                    
+                    explanation.append({
+                        "feature": feature_name,
+                        "value": safe_float(feature_value),
+                        "shap_value": safe_float(importance),
+                        "impact": "positive",
+                    })
+            
+            return explanation if explanation else "No importance values computed."
+        except Exception as perm_err:
+            pass
+        
+        # Last fallback: use coef_ for linear models
+        if hasattr(model, 'coef_'):
+            coef = model.coef_[0] if len(model.coef_.shape) > 1 else model.coef_
+            top_indices = np.argsort(np.abs(coef))[-max_features:][::-1]
+            
+            explanation = []
+            for idx in top_indices:
+                if idx < len(feature_columns):
+                    feature_name = feature_columns[idx]
+                    feature_value = patient_features.iloc[0, idx]
+                    coef_value = coef[idx]
+                    impact = "positive" if coef_value > 0 else "negative"
+                    
+                    explanation.append({
+                        "feature": feature_name,
+                        "value": safe_float(feature_value),
+                        "shap_value": safe_float(coef_value),
+                        "impact": impact,
+                    })
+            
+            return explanation if explanation else "No coefficients computed."
+        
+        return "Model type not supported for explanations."
+    
+    except Exception as e:
+        return f"SHAP explanation failed: {str(e)}"

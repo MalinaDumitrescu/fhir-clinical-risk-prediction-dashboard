@@ -4,20 +4,27 @@ from datetime import datetime, timezone
 from backend.app.config import RISK_ASSESSMENTS_PATH
 
 
-def build_rationale(explanation):
+def create_risk_note(explanation):
     if not explanation:
-        return "No explanation available."
+        return "No detailed explanation available."
 
-    parts = []
+    if isinstance(explanation, str):
+        return explanation
 
-    for item in explanation[:5]:
+    if not isinstance(explanation, list):
+        return "Explanation format is not supported."
+
+    feature_lines = []
+    for item in explanation:
         feature = item.get("feature", "unknown feature")
         impact = item.get("impact", "unknown impact")
-        shap_value = item.get("shap_value", 0.0)
+        value = item.get("value", "N/A")
+        shap_value = item.get("shap_value", "N/A")
 
-        parts.append(f"{feature} {impact} SHAP={shap_value:.4f}")
+        line = f"- {feature} (value: {value}, SHAP: {shap_value}): {impact}"
+        feature_lines.append(line)
 
-    return "Top contributors: " + "; ".join(parts)
+    return "Risk factors considered:\\n" + "\\n".join(feature_lines)
 
 
 def create_risk_assessment(
@@ -51,26 +58,24 @@ def create_risk_assessment(
         "basis": basis_refs,
         "prediction": [
             {
-                "outcome": {
-                    "text": "Risk of long ICU stay"
-                },
-                "probabilityDecimal": round(float(probability), 4),
+                "probabilityDecimal": probability,
                 "qualitativeRisk": {
                     "text": risk_level
                 },
-                "rationale": build_rationale(explanation)
+                "rationale": create_risk_note(explanation),
             }
         ],
         "note": [
             {
                 "text": "Educational prototype only. Not for clinical use."
             }
-        ]
+        ],
     }
 
     return risk_assessment
 
 
 def save_risk_assessment(risk_assessment):
+    RISK_ASSESSMENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(RISK_ASSESSMENTS_PATH, "a", encoding="utf-8") as file:
-        file.write(json.dumps(risk_assessment) + "\n")
+        file.write(json.dumps(risk_assessment) + "\\n")

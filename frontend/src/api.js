@@ -74,3 +74,15 @@ export async function getModelDetails() {
 
   return response.json();
 }
+
+export async function getRiskAssessments() {
+  const response = await fetch(`${API_BASE}/risk-assessments`);
+  if (!response.ok) {
+    throw new Error("Could not load risk assessments");
+  }
+  return response.json();
+}
+
+export function getRiskAssessmentsDownloadUrl() {
+  return `${API_BASE}/risk-assessments/download`;
+}

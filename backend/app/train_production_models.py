@@ -98,7 +98,7 @@ def log_candidate_to_mlflow(model_name, params, metrics, model_file):
 
 
 def train_production(n_trials):
-    mlflow.set_tracking_uri(MLFLOW_DIR.as_uri())
+    mlflow.set_tracking_uri("sqlite:///" + str(MLFLOW_DIR / "mlflow.db"))
     mlflow.set_experiment("clinical-risk-fhir-dashboard")
 
     df = load_or_rebuild_features()
@@ -272,6 +272,13 @@ def train_production(n_trials):
 
     training_date = datetime.now(timezone.utc).isoformat()
 
+    best_trial_details = {
+        "number": int(study.best_trial.number),
+        "value": float(study.best_trial.value),
+        "params": study.best_trial.params,
+        "datetime": study.best_trial.datetime_start.isoformat() if study.best_trial.datetime_start else None,
+    }
+
     model_details = {
         "model_name": best_model_name,
         "active_prediction_pipeline": "calibrated_pipeline" if calibrated else "base_pipeline",
@@ -287,6 +294,7 @@ def train_production(n_trials):
         "feature_columns": feature_cols,
         "training_date_utc": training_date,
         "selection_metric": "ROC-AUC if available, else average precision, else balanced accuracy",
+        "best_optuna_trial": best_trial_details,
     }
 
     active_artifact = {
@@ -342,7 +350,18 @@ def train_production(n_trials):
         )
 
         mlflow.log_metrics(flatten_numeric_metrics(active_metrics))
-        mlflow.sklearn.log_model(calibrated_pipeline, "calibrated_prediction_pipeline")
+        mlflow.sklearn.log_model(
+            calibrated_pipeline,
+            "calibrated_prediction_pipeline",
+            skops_trusted_types=[
+                "numpy.dtype",
+                "sklearn.calibration._CalibratedClassifier",
+                "sklearn.calibration._SigmoidCalibration",
+                "sklearn.model_selection._split.StratifiedKFold",
+                "xgboost.core.Booster",
+                "xgboost.sklearn.XGBClassifier",
+            ],
+        )
         mlflow.log_artifact(str(METRICS_PATH))
         mlflow.log_artifact(str(MODEL_COMPARISON_PATH))
         mlflow.log_artifact(str(MODEL_DETAILS_PATH))
