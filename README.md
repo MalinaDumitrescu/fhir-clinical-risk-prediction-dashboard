@@ -2,7 +2,7 @@
 
 An educational medical informatics prototype that predicts the risk of long ICU stays using structured FHIR resources and machine learning. This system leverages the MIMIC-IV-on-FHIR demo dataset to provide clinical risk assessments with explainability features.
 
-## ⚠ Important Disclaimer
+## Important Disclaimer
 
 **This system is NOT intended for real clinical decision-making.** It is an educational prototype designed to demonstrate how machine learning can be applied to FHIR-structured healthcare data. Any clinical use requires rigorous validation, regulatory approval, and clinical oversight.
 
@@ -45,7 +45,7 @@ The FHIR Clinical Risk Prediction Dashboard is a full-stack application that:
 
 ---
 
-## ✨ Features
+##  Features
 
 ### Backend Features
 -  **FHIR Data Processing**: Parse and extract clinical data from FHIR resources
@@ -63,7 +63,7 @@ The FHIR Clinical Risk Prediction Dashboard is a full-stack application that:
 - ️ **Modern Build Tools**: Vite for fast development and optimized builds
 ---
 
-## 🛠 Technology Stack
+##  Technology Stack
 
 ### Backend
 - **Framework**: FastAPI 1.0+ with Uvicorn
@@ -139,7 +139,7 @@ cd ..
 
 ---
 
-## ▶️ Running the Project
+##  Running the Project
 
 ### Option 1: Run Backend and Frontend Separately
 
