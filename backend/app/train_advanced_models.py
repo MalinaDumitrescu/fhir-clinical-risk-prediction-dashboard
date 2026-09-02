@@ -42,6 +42,7 @@ from backend.app.config import (
     MODELS_DIR,
 )
 from backend.app.features import build_feature_dataframe
+from backend.app.evaluation_utils import evaluate_binary_classifier
 
 
 warnings.filterwarnings("ignore")
@@ -67,9 +68,8 @@ except Exception:
 
 
 def load_or_create_features():
-    if FEATURES_CSV.exists():
-        return pd.read_csv(FEATURES_CSV)
-
+    # Always rebuild from source FHIR so stale artifacts cannot silently
+    # survive feature-definition changes.
     df = build_feature_dataframe()
     df.to_csv(FEATURES_CSV, index=False)
     return df
@@ -89,6 +89,7 @@ def prepare_xy(df):
         "patient_id",
         "birth_date",
         "deceased",
+        "index_hospital_encounter_id",
         "icu_los_days",
         "hospital_los_days",
         TARGET_COL,
@@ -429,35 +430,65 @@ def build_ensembles(best_trials_by_model, y):
     return ensembles
 
 
+def split_train_validation_test(X, y):
+    """Create a stratified 60/20/20 train/validation/test split."""
+    stratify = y if y.value_counts().min() >= 2 else None
+
+    X_dev, X_test, y_dev, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=RANDOM_STATE,
+        stratify=stratify,
+    )
+
+    stratify_dev = y_dev if y_dev.value_counts().min() >= 2 else None
+    X_train, X_validation, y_train, y_validation = train_test_split(
+        X_dev,
+        y_dev,
+        test_size=0.25,  # 25% of 80% = 20% of full data
+        random_state=RANDOM_STATE,
+        stratify=stratify_dev,
+    )
+
+    return X_train, X_validation, X_test, y_train, y_validation, y_test
+
+
+def build_selected_model(best_model_name, best_artifact, best_trials_by_model, y):
+    """Rebuild the selected base or ensemble model for final fitting."""
+    if best_artifact.get("optuna_params"):
+        return build_model_from_params(best_artifact["optuna_params"], y)
+
+    ensembles = build_ensembles(best_trials_by_model, y)
+    if best_model_name not in ensembles:
+        raise ValueError(f"Could not rebuild selected model: {best_model_name}")
+
+    return ensembles[best_model_name]
+
+
 def train_advanced(n_trials):
     df = load_or_create_features()
-
     X, y, feature_cols, numeric_cols, categorical_cols = prepare_xy(df)
 
     print("Dataset shape:", df.shape)
     print("Features:", len(feature_cols))
     print("Target distribution:")
     print(y.value_counts())
-    print()
-    print("Available model families:")
-    print(get_available_model_names())
-    print()
+    print("Available model families:", get_available_model_names())
 
-    stratify = y if y.value_counts().min() >= 2 else None
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.25,
-        random_state=RANDOM_STATE,
-        stratify=stratify,
-    )
+    (
+        X_train,
+        X_validation,
+        X_test,
+        y_train,
+        y_validation,
+        y_test,
+    ) = split_train_validation_test(X, y)
 
     study = optuna.create_study(
         direction="maximize",
         study_name="clinical_risk_model_tuning",
     )
-
     study.optimize(
         lambda trial: objective(
             trial,
@@ -469,37 +500,23 @@ def train_advanced(n_trials):
         n_trials=n_trials,
     )
 
-    trials_df = study.trials_dataframe()
-    trials_df.to_csv(OPTUNA_TRIALS_CSV, index=False)
-
+    study.trials_dataframe().to_csv(OPTUNA_TRIALS_CSV, index=False)
     best_trials_by_model = get_best_trial_per_model(study)
 
     comparison = []
     trained_artifacts = {}
 
-    print()
-    print("Best Optuna trial overall:")
-    print("Value:", study.best_value)
-    print("Params:", study.best_params)
-    print()
-
-    # Train best trial from each model family
     for model_name, trial in best_trials_by_model.items():
-        print(f"Training tuned candidate: {model_name}")
-
         model = build_model_from_params(trial.params, y_train)
         pipeline = make_pipeline(model, numeric_cols, categorical_cols)
-
-        metrics = evaluate_pipeline(
-            pipeline,
-            X_train,
-            X_test,
-            y_train,
-            y_test,
+        pipeline.fit(X_train, y_train)
+        validation_metrics = evaluate_binary_classifier(
+            pipeline, X_validation, y_validation
         )
 
         artifact = {
             "pipeline": pipeline,
+            "prediction_pipeline": pipeline,
             "model_name": model_name,
             "feature_columns": feature_cols,
             "target_column": TARGET_COL,
@@ -507,40 +524,32 @@ def train_advanced(n_trials):
             "categorical_columns": categorical_cols,
             "optuna_cv_score": float(trial.value),
             "optuna_params": trial.params,
+            "calibrated": False,
         }
-
         model_file = MODELS_DIR / f"{model_name}.joblib"
         joblib.dump(artifact, model_file)
-
         trained_artifacts[model_name] = artifact
 
-        comparison.append(
-            {
-                "model_name": model_name,
-                "model_file": str(model_file),
-                "optuna_cv_roc_auc": float(trial.value),
-                **metrics,
-            }
-        )
+        comparison.append({
+            "model_name": model_name,
+            "model_file": str(model_file),
+            "evaluation_split": "validation",
+            "optuna_cv_roc_auc": float(trial.value),
+            **validation_metrics,
+        })
 
-    # Train ensembles from tuned base models
-    ensemble_models = build_ensembles(best_trials_by_model, y_train)
-
-    for ensemble_name, ensemble_model in ensemble_models.items():
-        print(f"Training ensemble: {ensemble_name}")
-
+    for ensemble_name, ensemble_model in build_ensembles(
+        best_trials_by_model, y_train
+    ).items():
         pipeline = make_pipeline(ensemble_model, numeric_cols, categorical_cols)
-
-        metrics = evaluate_pipeline(
-            pipeline,
-            X_train,
-            X_test,
-            y_train,
-            y_test,
+        pipeline.fit(X_train, y_train)
+        validation_metrics = evaluate_binary_classifier(
+            pipeline, X_validation, y_validation
         )
 
         artifact = {
             "pipeline": pipeline,
+            "prediction_pipeline": pipeline,
             "model_name": ensemble_name,
             "feature_columns": feature_cols,
             "target_column": TARGET_COL,
@@ -548,55 +557,65 @@ def train_advanced(n_trials):
             "categorical_columns": categorical_cols,
             "optuna_cv_score": None,
             "optuna_params": None,
+            "calibrated": False,
         }
-
         model_file = MODELS_DIR / f"{ensemble_name}.joblib"
         joblib.dump(artifact, model_file)
-
         trained_artifacts[ensemble_name] = artifact
 
-        comparison.append(
-            {
-                "model_name": ensemble_name,
-                "model_file": str(model_file),
-                "optuna_cv_roc_auc": None,
-                **metrics,
-            }
-        )
+        comparison.append({
+            "model_name": ensemble_name,
+            "model_file": str(model_file),
+            "evaluation_split": "validation",
+            "optuna_cv_roc_auc": None,
+            **validation_metrics,
+        })
 
-    comparison = sorted(
-        comparison,
-        key=lambda item: score_for_selection(item),
-        reverse=True,
-    )
-
+    comparison = sorted(comparison, key=score_for_selection, reverse=True)
     best_model_name = comparison[0]["model_name"]
     best_artifact = trained_artifacts[best_model_name]
-    best_metrics = comparison[0]
 
-    joblib.dump(best_artifact, MODEL_PATH)
+    X_train_validation = pd.concat([X_train, X_validation], axis=0)
+    y_train_validation = pd.concat([y_train, y_validation], axis=0)
+
+    final_model = build_selected_model(
+        best_model_name,
+        best_artifact,
+        best_trials_by_model,
+        y_train_validation,
+    )
+    final_pipeline = make_pipeline(final_model, numeric_cols, categorical_cols)
+    final_pipeline.fit(X_train_validation, y_train_validation)
+    test_metrics = evaluate_binary_classifier(final_pipeline, X_test, y_test)
+
+    final_artifact = {
+        **best_artifact,
+        "pipeline": final_pipeline,
+        "prediction_pipeline": final_pipeline,
+        "model_name": best_model_name,
+        "calibrated": False,
+        "active_metrics": test_metrics,
+    }
+    joblib.dump(final_artifact, MODEL_PATH)
 
     with open(METRICS_PATH, "w", encoding="utf-8") as file:
-        json.dump(best_metrics, file, indent=4)
+        json.dump({
+            "model_name": best_model_name,
+            "evaluation_split": "test",
+            **test_metrics,
+        }, file, indent=4)
 
     with open(MODEL_COMPARISON_PATH, "w", encoding="utf-8") as file:
-        json.dump(
-            {
-                "best_model_name": best_model_name,
-                "selection_metric": "roc_auc if available, else average_precision, else balanced_accuracy",
-                "models": comparison,
-            },
-            file,
-            indent=4,
-        )
+        json.dump({
+            "best_model_name": best_model_name,
+            "selection_split": "validation",
+            "selection_metric": "ROC-AUC if available, else average precision, else balanced accuracy",
+            "models": comparison,
+        }, file, indent=4)
 
-    print()
-    print("Best selected model:", best_model_name)
-    print("Saved active model to:", MODEL_PATH)
-    print("Saved active metrics to:", METRICS_PATH)
-    print("Saved comparison to:", MODEL_COMPARISON_PATH)
-    print("Saved Optuna trials to:", OPTUNA_TRIALS_CSV)
-
+    print("Selected on validation:", best_model_name)
+    print("Final untouched-test metrics:")
+    print(test_metrics)
 
 def main():
     parser = argparse.ArgumentParser()

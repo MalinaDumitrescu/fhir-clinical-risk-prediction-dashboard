@@ -92,17 +92,38 @@ def compute_curves(y_true, y_proba, n_bins=10):
     return curves
 
 
-def evaluate_binary_classifier(model, X_test, y_test):
-    y_pred = model.predict(X_test)
+def evaluate_binary_classifier(
+    model,
+    X_test,
+    y_test,
+    decision_threshold=0.5,
+):
     y_proba = get_probability_scores(model, X_test)
 
+    if y_proba is not None:
+        y_pred = (y_proba >= decision_threshold).astype(int)
+    else:
+        y_pred = model.predict(X_test)
+
     metrics = {
+        "decision_threshold": safe_float(decision_threshold),
         "accuracy": safe_float(accuracy_score(y_test, y_pred)),
-        "balanced_accuracy": safe_float(balanced_accuracy_score(y_test, y_pred)),
-        "precision": safe_float(precision_score(y_test, y_pred, zero_division=0)),
-        "recall": safe_float(recall_score(y_test, y_pred, zero_division=0)),
-        "f1": safe_float(f1_score(y_test, y_pred, zero_division=0)),
-        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+        "balanced_accuracy": safe_float(
+            balanced_accuracy_score(y_test, y_pred)
+        ),
+        "precision": safe_float(
+            precision_score(y_test, y_pred, zero_division=0)
+        ),
+        "recall": safe_float(
+            recall_score(y_test, y_pred, zero_division=0)
+        ),
+        "f1": safe_float(
+            f1_score(y_test, y_pred, zero_division=0)
+        ),
+        "confusion_matrix": confusion_matrix(
+            y_test,
+            y_pred,
+        ).tolist(),
         "classification_report": classification_report(
             y_test,
             y_pred,
@@ -118,11 +139,22 @@ def evaluate_binary_classifier(model, X_test, y_test):
     }
 
     if y_proba is not None and len(set(y_test)) == 2:
-        metrics["roc_auc"] = safe_float(roc_auc_score(y_test, y_proba))
-        metrics["average_precision"] = safe_float(average_precision_score(y_test, y_proba))
-        metrics["brier_score"] = safe_float(brier_score_loss(y_test, y_proba))
+        metrics["roc_auc"] = safe_float(
+            roc_auc_score(y_test, y_proba)
+        )
 
-        curves = compute_curves(y_test, y_proba)
+        metrics["average_precision"] = safe_float(
+            average_precision_score(y_test, y_proba)
+        )
+
+        metrics["brier_score"] = safe_float(
+            brier_score_loss(y_test, y_proba)
+        )
+
+        curves = compute_curves(
+            y_test,
+            y_proba,
+        )
         metrics.update(curves)
 
     return metrics

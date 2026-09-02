@@ -130,8 +130,8 @@ function App() {
         <div className="brand">
           <div className="brand-mark">+</div>
           <div>
-            <div className="brand-name">MEDREPAIR</div>
-            <div className="brand-subtitle">Clinical Intelligence</div>
+           <div className="brand-name">FHIR RISK</div>
+           <div className="brand-subtitle">Clinical ML Prototype</div>
           </div>
         </div>
 
@@ -161,7 +161,7 @@ function App() {
         <div className="sidebar-footer">
           <div className="system-status">
             <span className="status-dot"></span>
-            Clinical service online
+             Prototype API online
           </div>
           <div className="sidebar-note">
             Decision-support prototype
@@ -182,7 +182,7 @@ function App() {
 
           <div className="topbar-status">
             <span className="status-dot"></span>
-            System operational
+            Prototype operational
           </div>
         </header>
 
@@ -261,12 +261,12 @@ function App() {
 
                 <div className="grid clinical-grid">
                   <Info
-                    label="Conditions 24h"
-                    value={selectedPatient.condition_count}
+                    label="Medication requests 24h"
+                    value={selectedPatient.medication_request_count}
                   />
                   <Info
-                    label="Medication events 24h"
-                    value={selectedPatient.medication_event_count}
+                    label="Medication administrations 24h"
+                    value={selectedPatient.medication_administration_count}
                   />
                   <Info
                     label="Procedures 24h"
@@ -298,47 +298,91 @@ function App() {
 
             {prediction && (
               <>
-                <div className={`risk-box ${getRiskClass(prediction.risk_level)}`}>
-                  <div className="risk-box-copy">
-                    <span className="risk-caption">Predicted probability</span>
-                    <div className="risk-percent">{prediction.risk_percent}%</div>
-                    <div className="risk-label">
-                      {prediction.risk_level.toUpperCase()} RISK
-                    </div>
-                  </div>
+  <div className={`risk-box ${getRiskClass(prediction.risk_level)}`}>
+    <div className="risk-box-copy">
+      <span className="risk-caption">
+        Predicted probability of prolonged ICU stay
+      </span>
 
-                  <div className="risk-gauge" aria-hidden="true">
-                    <div className="risk-gauge-inner">
-                      {prediction.risk_percent}%
-                    </div>
-                  </div>
-                </div>
+      <div className="risk-percent">
+        {prediction.risk_percent}%
+      </div>
 
-                <div className="model-strip">
-                  <div>
-                    <span>Model</span>
-                    <strong>{prediction.model_name}</strong>
-                  </div>
-                  <div>
-                    <span>Calibrated</span>
-                    <strong>{String(prediction.calibrated)}</strong>
-                  </div>
-                </div>
+      <div className="risk-label">
+        {prediction.predicted_long_icu_stay
+          ? "PROLONGED ICU STAY PREDICTED"
+          : "PROLONGED ICU STAY NOT PREDICTED"}
+      </div>
+    </div>
 
-                {prediction.warning && (
-                  <p className="warning">
-                    <span>!</span>
-                    {prediction.warning}
-                  </p>
-                )}
+    <div className="risk-gauge" aria-hidden="true">
+      <div className="risk-gauge-inner">
+        {prediction.risk_percent}%
+      </div>
+    </div>
+  </div>
 
-                <button
-                  className="primary-button"
-                  onClick={handleExportRiskAssessment}
-                >
-                  Export FHIR RiskAssessment
-                </button>
-              </>
+  <div className="grid metrics-grid prediction-details-grid">
+    <Info
+      label="Probability"
+      value={`${prediction.risk_percent}%`}
+    />
+
+    <Info
+      label="Decision threshold"
+      value={`${prediction.decision_threshold_percent}%`}
+    />
+
+    <Info
+      label="Binary prediction"
+      value={
+        prediction.predicted_long_icu_stay
+          ? "Positive"
+          : "Negative"
+      }
+    />
+
+    <Info
+      label="Display probability band"
+      value={prediction.risk_level.toUpperCase()}
+    />
+  </div>
+
+  <p className="small-info">
+    The positive/negative prediction is determined using the
+    development-derived threshold saved with the trained model.
+    Low/medium/high is only a descriptive probability band and is
+    not a clinically validated decision category.
+  </p>
+
+  <div className="model-strip">
+    <div>
+      <span>Model</span>
+      <strong>{prediction.model_name}</strong>
+    </div>
+
+    <div>
+      <span>Calibrated</span>
+      <strong>
+        {prediction.calibrated ? "Yes" : "No"}
+      </strong>
+    </div>
+  </div>
+
+  {prediction.warning && (
+    <p className="warning">
+      <span>!</span>
+      {prediction.warning}
+    </p>
+  )}
+
+  <button
+    className="primary-button"
+    onClick={handleExportRiskAssessment}
+  >
+    Export FHIR RiskAssessment
+  </button>
+</>
             )}
           </section>
 
@@ -380,8 +424,8 @@ function App() {
           <section className="panel metrics-panel" id="performance">
             <div className="panel-heading compact">
               <div>
-                <div className="section-kicker">Validation</div>
-                <h2>Model Metrics</h2>
+                <div className="section-kicker">Held-out test evaluation</div>
+                <h2>Final Model Metrics</h2>
               </div>
               {metrics && (
                 <span className="model-badge">
@@ -393,22 +437,44 @@ function App() {
             {!metrics && <p>Train the model to see metrics.</p>}
 
             {metrics && (
-              <div className="grid metrics-grid">
-                <Info label="Calibrated" value={String(metrics.calibrated)} />
-                <Info label="Accuracy" value={round(metrics.accuracy)} />
-                <Info label="ROC-AUC" value={round(metrics.roc_auc)} />
-                <Info
-                  label="Average precision"
-                  value={round(metrics.average_precision)}
-                />
-                <Info label="Brier score" value={round(metrics.brier_score)} />
-                <Info
-                  label="Balanced accuracy"
-                  value={round(metrics.balanced_accuracy)}
-                />
-                <Info label="Recall" value={round(metrics.recall)} />
-                <Info label="F1" value={round(metrics.f1)} />
-              </div>
+              <>
+                <div className="grid metrics-grid">
+                  <Info label="Model" value={metrics.model_name} />
+                  <Info
+                    label="Calibrated"
+                    value={metrics.calibrated ? "Yes" : "No"}
+                  />
+                  <Info label="ROC-AUC" value={round(metrics.roc_auc)} />
+                  <Info
+                    label="Average precision"
+                    value={round(metrics.average_precision)}
+                  />
+                  <Info label="Brier score" value={round(metrics.brier_score)} />
+                  <Info label="Accuracy" value={round(metrics.accuracy)} />
+                  <Info
+                    label="Balanced accuracy"
+                    value={round(metrics.balanced_accuracy)}
+                  />
+                  <Info label="Precision" value={round(metrics.precision)} />
+                  <Info label="Recall" value={round(metrics.recall)} />
+                  <Info label="F1" value={round(metrics.f1)} />
+                  <Info
+                    label="Decision threshold"
+                    value={round(metrics.decision_threshold)}
+                  />
+                  <Info
+                    label="Evaluation split"
+                    value={metrics.evaluation_split || "test"}
+                  />
+                </div>
+
+                <p className="small-info metrics-note">
+                  Final performance is reported on a held-out 20-patient test
+                  partition. Because the test set contains only five positive
+                  outcomes, these estimates have substantial statistical
+                  uncertainty and are not evidence of clinical validity.
+                </p>
+              </>
             )}
           </section>
 
@@ -458,10 +524,15 @@ function App() {
 
             {modelDetails && (
               <div className="details-list">
+                <DetailRow label="Model" value={modelDetails.model_name} />
                 <DetailRow label="Target" value={modelDetails.target} />
                 <DetailRow
                   label="Target definition"
                   value={modelDetails.target_definition}
+                />
+                <DetailRow
+                  label="Index admission"
+                  value={modelDetails.index_admission_definition}
                 />
                 <DetailRow
                   label="Prediction window"
@@ -471,25 +542,50 @@ function App() {
                   label="Leakage policy"
                   value={modelDetails.leakage_policy}
                 />
+                <DetailRow
+                  label="Observation mapping"
+                  value={modelDetails.observation_mapping}
+                />
                 <DetailRow label="Patients" value={modelDetails.n_patients} />
+                <DetailRow
+                  label="Development cohort"
+                  value={modelDetails.n_development}
+                />
+                <DetailRow
+                  label="Train / validation / test"
+                  value={`${modelDetails.n_train} / ${modelDetails.n_validation} / ${modelDetails.n_test}`}
+                />
                 <DetailRow label="Features" value={modelDetails.n_features} />
+                <DetailRow
+                  label="Model selection split"
+                  value={modelDetails.selection_split}
+                />
+                <DetailRow
+                  label="Final evaluation split"
+                  value={modelDetails.final_evaluation_split}
+                />
+                <DetailRow
+                  label="Decision threshold"
+                  value={round(modelDetails.decision_threshold)}
+                />
+                <DetailRow
+                  label="Threshold selection"
+                  value={modelDetails.threshold_selection_method}
+                />
+                <DetailRow
+                  label="Threshold objective"
+                  value={modelDetails.threshold_selection_metric}
+                />
+                <DetailRow
+                  label="OOF balanced accuracy"
+                  value={round(modelDetails.oof_balanced_accuracy_at_threshold)}
+                />
+                <DetailRow label="Random state" value={modelDetails.random_state} />
+                <DetailRow label="Optuna trials" value={modelDetails.optuna_trials} />
                 <DetailRow
                   label="Training date"
                   value={modelDetails.training_date_utc}
                 />
-
-                {modelDetails.best_optuna_trial && (
-                  <div className="optuna-highlight">
-                    <div>
-                      <span>Best Optuna trial</span>
-                      <strong>#{modelDetails.best_optuna_trial.number}</strong>
-                    </div>
-                    <div>
-                      <span>Best CV value</span>
-                      <strong>{round(modelDetails.best_optuna_trial.value)}</strong>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </section>
@@ -540,8 +636,8 @@ function App() {
           <section className="panel model-comparison-panel full-width">
             <div className="panel-heading compact">
               <div>
-                <div className="section-kicker">Benchmarking</div>
-                <h2>Model Comparison</h2>
+                <div className="section-kicker">Validation-stage benchmarking</div>
+                <h2>Candidate Model Comparison</h2>
               </div>
               {modelComparison && (
                 <span className="model-badge">
@@ -557,7 +653,7 @@ function App() {
             {modelComparison && (
               <>
                 <p className="small-info comparison-rule">
-                  Selection rule: {modelComparison.selection_metric}
+                  Candidate models were compared on the validation partition only. Selection rule: {modelComparison.selection_metric}
                 </p>
 
                 <div className="table-wrapper">

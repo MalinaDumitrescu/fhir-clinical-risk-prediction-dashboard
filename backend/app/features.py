@@ -5,74 +5,118 @@ import pandas as pd
 
 from backend.app.config import DATA_DIR, FEATURES_CSV
 from backend.app.fhir_utils import (
-    load_ndjson,
+    days_between,
+    get_encounter_id,
+    get_event_time,
+    get_observation_codes,
+    get_observation_time,
+    get_period_end,
+    get_period_start,
+    get_quantity,
     get_reference_id,
     get_subject_patient_id,
-    get_encounter_id,
-    get_period_start,
-    get_period_end,
-    get_observation_time,
-    get_numeric_value,
-    get_observation_display,
-    get_event_time,
+    load_ndjson,
     parse_datetime,
-    days_between,
 )
 
 
 PREDICTION_WINDOW_HOURS = 24
 
+MIMIC_LAB_SYSTEM = "http://fhir.mimic.mit.edu/CodeSystem/d-labitems"
+MIMIC_CHART_SYSTEM = "http://fhir.mimic.mit.edu/CodeSystem/chartevents-d-items"
 
-OBSERVATION_KEYWORDS = {
-    "heart_rate": ["heart rate"],
-    "respiratory_rate": ["respiratory rate"],
-    "spo2": ["oxygen saturation", "o2 saturation", "spo2"],
-    "temperature": ["temperature"],
-    "systolic_bp": ["systolic"],
-    "diastolic_bp": ["diastolic"],
-    "glucose": ["glucose"],
-    "creatinine": ["creatinine"],
-    "hemoglobin": ["hemoglobin"],
-    "white_blood_cells": ["white blood", "wbc"],
-    "sodium": ["sodium"],
-    "potassium": ["potassium"],
-    "lactate": ["lactate"],
+# Deliberately conservative mappings. These codes were verified against the
+# supplied MIMIC-IV-on-FHIR resources. Broad display-name matching is avoided
+# because it previously mixed measurements with alarm limits, ventilator
+# settings, urine tests, LDH, pulmonary-artery pressures, etc.
+LAB_CODE_MAP = {
+    "50912": ("creatinine", {"mg/dl"}),
+    "50971": ("potassium", {"meq/l"}),
+    "51222": ("hemoglobin", {"g/dl"}),
+    "50983": ("sodium", {"meq/l"}),
+    "50813": ("lactate", {"mmol/l"}),
+    "51301": ("white_blood_cells", {"k/ul"}),
+    "50931": ("glucose", {"mg/dl"}),
 }
 
+CHART_CODE_MAP = {
+    "220045": ("heart_rate", {"bpm"}),
+    "220210": ("respiratory_rate", {"insp/min"}),
+    "220277": ("spo2", {"%"}),
+    "220179": ("systolic_bp", {"mmhg"}),
+    "220050": ("systolic_bp", {"mmhg"}),
+    "220180": ("diastolic_bp", {"mmhg"}),
+    "220051": ("diastolic_bp", {"mmhg"}),
+    "223761": ("temperature", {"°f", "degf", "f"}),
+    "223762": ("temperature", {"°c", "degc", "c"}),
+}
 
-def match_observation_feature(display_name):
-    display_name = display_name.lower()
-
-    for feature_name, keywords in OBSERVATION_KEYWORDS.items():
-        for keyword in keywords:
-            if keyword in display_name:
-                return feature_name
-
-    return None
+TEMPERATURE_F_CODE = "223761"
+TEMPERATURE_C_CODE = "223762"
 
 
-def is_within_prediction_window(patient_id, event_time, patient_first_start):
+FEATURE_NAMES = [
+    "creatinine",
+    "potassium",
+    "hemoglobin",
+    "sodium",
+    "lactate",
+    "white_blood_cells",
+    "glucose",
+    "heart_rate",
+    "respiratory_rate",
+    "spo2",
+    "systolic_bp",
+    "diastolic_bp",
+    "temperature",
+]
+
+
+def _normalize_unit(unit):
+    if unit is None:
+        return None
+
+    return (
+        str(unit)
+        .strip()
+        .lower()
+        .replace("μ", "u")
+        .replace("µ", "u")
+        .replace(" ", "")
+        .replace(".", "")
+    )
+
+
+def _resource_belongs_to_index_admission(resource, patient_id, eligible_encounter_ids):
+    """
+    If the resource carries an encounter/context reference, require it to
+    belong to the patient's index admission. Untagged resources are allowed
+    only because the subsequent timestamp window still has to match.
+    """
+    encounter_id = get_encounter_id(resource)
+    if not encounter_id:
+        return True
+
+    return encounter_id in eligible_encounter_ids.get(patient_id, set())
+
+
+def _is_within_prediction_window(patient_id, event_time, patient_index_start):
     if event_time is None:
         return False
 
-    first_start = patient_first_start.get(patient_id)
-
-    if first_start is None:
+    start = patient_index_start.get(patient_id)
+    if start is None:
         return False
 
-    first_end = first_start + timedelta(hours=PREDICTION_WINDOW_HOURS)
-
-    return first_start <= event_time <= first_end
+    end = start + timedelta(hours=PREDICTION_WINDOW_HOURS)
+    return start <= event_time <= end
 
 
 def build_patient_base():
-    patients = load_ndjson(DATA_DIR / "Patient.ndjson")
-
     rows = {}
 
-    for patient in patients:
+    for patient in load_ndjson(DATA_DIR / "Patient.ndjson"):
         patient_id = patient.get("id")
-
         if not patient_id:
             continue
 
@@ -81,14 +125,10 @@ def build_patient_base():
             "gender": patient.get("gender", "unknown"),
             "birth_date": patient.get("birthDate"),
             "deceased": 1 if patient.get("deceasedDateTime") else 0,
-
-            # First-24h features only
-            "condition_count": 0,
-            "medication_event_count": 0,
+            "index_hospital_encounter_id": None,
+            "medication_request_count": 0,
+            "medication_administration_count": 0,
             "procedure_count": 0,
-            "encounter_count": 0,
-
-            # Outcomes / descriptive variables
             "icu_los_days": 0.0,
             "hospital_los_days": 0.0,
         }
@@ -96,219 +136,265 @@ def build_patient_base():
     return rows
 
 
-def build_encounter_maps(patient_rows):
+def build_index_admission_maps(patient_rows):
+    """
+    Define one explicit index hospital admission per patient.
+
+    The earliest hospital Encounter is the index admission. ICU Encounters are
+    linked through ``EncounterICU.partOf`` and only ICU time belonging to this
+    index admission contributes to the target.
+    """
     encounter_to_patient = {}
-    patient_first_start = {}
+    hospital_encounters_by_patient = defaultdict(list)
 
-    encounter_files = [
-        DATA_DIR / "Encounter.ndjson",
-        DATA_DIR / "EncounterICU.ndjson",
-    ]
+    hospital_encounters = load_ndjson(DATA_DIR / "Encounter.ndjson")
+    icu_encounters = load_ndjson(DATA_DIR / "EncounterICU.ndjson")
 
-    for file_path in encounter_files:
-        encounters = load_ndjson(file_path)
+    for encounter in hospital_encounters:
+        encounter_id = encounter.get("id")
+        patient_id = get_subject_patient_id(encounter)
+        start = get_period_start(encounter)
 
-        for encounter in encounters:
-            encounter_id = encounter.get("id")
-            subject = encounter.get("subject", {})
-            patient_id = get_reference_id(subject.get("reference"))
-
-            if not encounter_id or not patient_id:
-                continue
-
+        if encounter_id and patient_id:
             encounter_to_patient[encounter_id] = patient_id
 
-            if patient_id not in patient_rows:
-                continue
+        if patient_id in patient_rows and encounter_id and start:
+            hospital_encounters_by_patient[patient_id].append(encounter)
 
-            patient_rows[patient_id]["encounter_count"] += 1
+    patient_index_start = {}
+    patient_index_encounter = {}
+    eligible_encounter_ids = defaultdict(set)
 
-            start = get_period_start(encounter)
-            end = get_period_end(encounter)
+    for patient_id, encounters in hospital_encounters_by_patient.items():
+        index_encounter = min(encounters, key=get_period_start)
+        index_id = index_encounter.get("id")
+        start = get_period_start(index_encounter)
+        end = get_period_end(index_encounter)
 
-            if start:
-                old_start = patient_first_start.get(patient_id)
+        patient_index_encounter[patient_id] = index_id
+        patient_index_start[patient_id] = start
+        eligible_encounter_ids[patient_id].add(index_id)
 
-                if old_start is None or start < old_start:
-                    patient_first_start[patient_id] = start
+        patient_rows[patient_id]["index_hospital_encounter_id"] = index_id
+        patient_rows[patient_id]["hospital_los_days"] = days_between(start, end)
 
-            los_days = days_between(start, end)
+    for encounter in icu_encounters:
+        encounter_id = encounter.get("id")
+        patient_id = get_subject_patient_id(encounter)
 
-            if file_path.name == "EncounterICU.ndjson":
-                patient_rows[patient_id]["icu_los_days"] += los_days
-            else:
-                patient_rows[patient_id]["hospital_los_days"] += los_days
+        if encounter_id and patient_id:
+            encounter_to_patient[encounter_id] = patient_id
 
-    return encounter_to_patient, patient_first_start
+        if patient_id not in patient_rows or not encounter_id:
+            continue
+
+        parent_id = get_reference_id(
+            (encounter.get("partOf") or {}).get("reference")
+        )
+
+        if parent_id != patient_index_encounter.get(patient_id):
+            continue
+
+        eligible_encounter_ids[patient_id].add(encounter_id)
+        patient_rows[patient_id]["icu_los_days"] += days_between(
+            get_period_start(encounter),
+            get_period_end(encounter),
+        )
+
+    return encounter_to_patient, patient_index_start, eligible_encounter_ids
 
 
-def add_age(patient_rows, patient_first_start):
+def add_age(patient_rows, patient_index_start):
     for patient_id, row in patient_rows.items():
-        birth_date = row.get("birth_date")
-        birth_dt = parse_datetime(birth_date)
-        first_start = patient_first_start.get(patient_id)
+        birth_dt = parse_datetime(row.get("birth_date"))
+        index_start = patient_index_start.get(patient_id)
 
-        if birth_dt and first_start:
-            age_days = (first_start.date() - birth_dt.date()).days
+        if birth_dt and index_start:
+            age_days = (index_start.date() - birth_dt.date()).days
             row["age"] = int(age_days / 365.25)
         else:
             row["age"] = None
 
 
-def count_conditions_24h(patient_rows, patient_first_start):
-    conditions = load_ndjson(DATA_DIR / "Condition.ndjson")
+def count_medications_24h(patient_rows, patient_index_start, eligible_encounter_ids):
+    request_seen = defaultdict(set)
+    administration_seen = defaultdict(set)
 
-    for condition in conditions:
-        patient_id = get_subject_patient_id(condition)
-
+    for resource in load_ndjson(DATA_DIR / "MedicationRequest.ndjson"):
+        patient_id = get_subject_patient_id(resource)
         if patient_id not in patient_rows:
             continue
+        if not _resource_belongs_to_index_admission(resource, patient_id, eligible_encounter_ids):
+            continue
+        if not _is_within_prediction_window(patient_id, get_event_time(resource), patient_index_start):
+            continue
 
-        event_time = get_event_time(condition)
+        resource_id = resource.get("id")
+        if resource_id and resource_id not in request_seen[patient_id]:
+            request_seen[patient_id].add(resource_id)
+            patient_rows[patient_id]["medication_request_count"] += 1
 
-        if is_within_prediction_window(patient_id, event_time, patient_first_start):
-            patient_rows[patient_id]["condition_count"] += 1
-
-
-def count_medications_24h(patient_rows, patient_first_start):
-    medication_files = [
-        DATA_DIR / "MedicationRequest.ndjson",
-        DATA_DIR / "MedicationAdministration.ndjson",
-        DATA_DIR / "MedicationAdministrationICU.ndjson",
-        DATA_DIR / "MedicationDispense.ndjson",
-    ]
-
-    for file_path in medication_files:
-        resources = load_ndjson(file_path)
-
-        for resource in resources:
+    for filename in ("MedicationAdministration.ndjson", "MedicationAdministrationICU.ndjson"):
+        for resource in load_ndjson(DATA_DIR / filename):
             patient_id = get_subject_patient_id(resource)
-
             if patient_id not in patient_rows:
                 continue
-
-            event_time = get_event_time(resource)
-
-            if is_within_prediction_window(patient_id, event_time, patient_first_start):
-                patient_rows[patient_id]["medication_event_count"] += 1
-
-
-def count_procedures_24h(patient_rows, patient_first_start):
-    procedure_files = [
-        DATA_DIR / "Procedure.ndjson",
-        DATA_DIR / "ProcedureICU.ndjson",
-    ]
-
-    for file_path in procedure_files:
-        resources = load_ndjson(file_path)
-
-        for resource in resources:
-            patient_id = get_subject_patient_id(resource)
-
-            if patient_id not in patient_rows:
+            if not _resource_belongs_to_index_admission(resource, patient_id, eligible_encounter_ids):
+                continue
+            if not _is_within_prediction_window(patient_id, get_event_time(resource), patient_index_start):
                 continue
 
-            event_time = get_event_time(resource)
+            resource_id = resource.get("id")
+            dedupe_key = f"{filename}:{resource_id}" if resource_id else None
+            if dedupe_key and dedupe_key not in administration_seen[patient_id]:
+                administration_seen[patient_id].add(dedupe_key)
+                patient_rows[patient_id]["medication_administration_count"] += 1
 
-            if is_within_prediction_window(patient_id, event_time, patient_first_start):
+
+def count_procedures_24h(patient_rows, patient_index_start, eligible_encounter_ids):
+    seen = defaultdict(set)
+
+    for filename in ("Procedure.ndjson", "ProcedureICU.ndjson"):
+        for resource in load_ndjson(DATA_DIR / filename):
+            patient_id = get_subject_patient_id(resource)
+            if patient_id not in patient_rows:
+                continue
+            if not _resource_belongs_to_index_admission(resource, patient_id, eligible_encounter_ids):
+                continue
+            if not _is_within_prediction_window(patient_id, get_event_time(resource), patient_index_start):
+                continue
+
+            resource_id = resource.get("id")
+            dedupe_key = f"{filename}:{resource_id}" if resource_id else None
+            if dedupe_key and dedupe_key not in seen[patient_id]:
+                seen[patient_id].add(dedupe_key)
                 patient_rows[patient_id]["procedure_count"] += 1
 
 
-def add_observation_features_24h(patient_rows, encounter_to_patient, patient_first_start):
-    observation_values = defaultdict(lambda: defaultdict(list))
+def _map_observation(resource):
+    quantity = get_quantity(resource)
+    if quantity is None:
+        return None
 
-    observation_files = [
-        DATA_DIR / "ObservationChartevents.ndjson",
-        DATA_DIR / "ObservationLabevents.ndjson",
-        DATA_DIR / "ObservationOutputevents.ndjson",
-        DATA_DIR / "ObservationDatetimeevents.ndjson",
-    ]
+    unit = _normalize_unit(quantity.get("unit") or quantity.get("code"))
+    value = quantity["value"]
 
-    for file_path in observation_files:
-        observations = load_ndjson(file_path)
+    for system, code in get_observation_codes(resource):
+        mapping = None
 
-        for observation in observations:
+        if system == MIMIC_LAB_SYSTEM:
+            mapping = LAB_CODE_MAP.get(code)
+        elif system == MIMIC_CHART_SYSTEM:
+            mapping = CHART_CODE_MAP.get(code)
+
+        if mapping is None:
+            continue
+
+        feature_name, accepted_units = mapping
+        if unit not in accepted_units:
+            return None
+
+        if code == TEMPERATURE_F_CODE:
+            value = (value - 32.0) * 5.0 / 9.0
+        elif code == TEMPERATURE_C_CODE:
+            value = value
+
+        return feature_name, float(value)
+
+    return None
+
+
+def add_observation_features_24h(
+    patient_rows,
+    encounter_to_patient,
+    patient_index_start,
+    eligible_encounter_ids,
+):
+    values = defaultdict(lambda: defaultdict(list))
+    seen_ids = set()
+
+    # Outputevents and Datetimeevents are deliberately excluded: they do not
+    # represent the 13 numeric lab/vital concepts used by this model.
+    for filename in ("ObservationChartevents.ndjson", "ObservationLabevents.ndjson"):
+        for observation in load_ndjson(DATA_DIR / filename):
+            observation_id = observation.get("id")
+            dedupe_key = f"{filename}:{observation_id}" if observation_id else None
+            if dedupe_key and dedupe_key in seen_ids:
+                continue
+            if dedupe_key:
+                seen_ids.add(dedupe_key)
+
             patient_id = get_subject_patient_id(observation)
-
             if not patient_id:
-                encounter_id = get_encounter_id(observation)
-                patient_id = encounter_to_patient.get(encounter_id)
+                patient_id = encounter_to_patient.get(get_encounter_id(observation))
 
             if patient_id not in patient_rows:
                 continue
 
-            value = get_numeric_value(observation)
-
-            if value is None:
-                continue
-
-            display_name = get_observation_display(observation)
-            feature_name = match_observation_feature(display_name)
-
-            if not feature_name:
+            if not _resource_belongs_to_index_admission(
+                observation,
+                patient_id,
+                eligible_encounter_ids,
+            ):
                 continue
 
             obs_time = get_observation_time(observation)
-
-            if not is_within_prediction_window(patient_id, obs_time, patient_first_start):
+            if not _is_within_prediction_window(patient_id, obs_time, patient_index_start):
                 continue
 
-            observation_values[patient_id][feature_name].append(value)
+            mapped = _map_observation(observation)
+            if mapped is None:
+                continue
 
-    for patient_id, feature_dict in observation_values.items():
-        for feature_name, values in feature_dict.items():
-            if values:
-                patient_rows[patient_id][f"{feature_name}_mean_24h"] = sum(values) / len(values)
-                patient_rows[patient_id][f"{feature_name}_min_24h"] = min(values)
-                patient_rows[patient_id][f"{feature_name}_max_24h"] = max(values)
+            feature_name, value = mapped
+            values[patient_id][feature_name].append(value)
+
+    for patient_id, feature_dict in values.items():
+        for feature_name, feature_values in feature_dict.items():
+            if not feature_values:
+                continue
+
+            patient_rows[patient_id][f"{feature_name}_mean_24h"] = (
+                sum(feature_values) / len(feature_values)
+            )
+            patient_rows[patient_id][f"{feature_name}_min_24h"] = min(feature_values)
+            patient_rows[patient_id][f"{feature_name}_max_24h"] = max(feature_values)
 
 
 def add_target(df):
+    """Target: >=3 ICU days during the explicit index hospital admission."""
     df["target_long_icu_stay"] = (df["icu_los_days"] >= 3.0).astype(int)
-
-    if df["target_long_icu_stay"].nunique() < 2:
-        positive_los = df[df["icu_los_days"] > 0]["icu_los_days"]
-
-        if len(positive_los) > 0:
-            median_los = positive_los.median()
-            df["target_long_icu_stay"] = (
-                df["icu_los_days"] >= median_los
-            ).astype(int)
-
     return df
 
 
 def build_feature_dataframe():
     patient_rows = build_patient_base()
 
-    encounter_to_patient, patient_first_start = build_encounter_maps(patient_rows)
+    encounter_to_patient, patient_index_start, eligible_encounter_ids = (
+        build_index_admission_maps(patient_rows)
+    )
 
-    add_age(patient_rows, patient_first_start)
-    count_conditions_24h(patient_rows, patient_first_start)
-    count_medications_24h(patient_rows, patient_first_start)
-    count_procedures_24h(patient_rows, patient_first_start)
-    add_observation_features_24h(patient_rows, encounter_to_patient, patient_first_start)
+    add_age(patient_rows, patient_index_start)
+    count_medications_24h(patient_rows, patient_index_start, eligible_encounter_ids)
+    count_procedures_24h(patient_rows, patient_index_start, eligible_encounter_ids)
+    add_observation_features_24h(
+        patient_rows,
+        encounter_to_patient,
+        patient_index_start,
+        eligible_encounter_ids,
+    )
 
     df = pd.DataFrame(list(patient_rows.values()))
-
     df = add_target(df)
-
     return df
 
 
 def main():
     df = build_feature_dataframe()
-
     df.to_csv(FEATURES_CSV, index=False)
 
-    print(f"Saved leakage-safe features to: {FEATURES_CSV}")
-    print()
-    print("Dataset shape:")
-    print(df.shape)
-    print()
-    print("Columns:")
-    print(df.columns.tolist())
-    print()
+    print(f"Saved corrected leakage-safe features to: {FEATURES_CSV}")
+    print("Dataset shape:", df.shape)
     print("Target distribution:")
     print(df["target_long_icu_stay"].value_counts())
 

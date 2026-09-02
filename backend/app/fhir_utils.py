@@ -2,11 +2,9 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
+
 def load_ndjson(file_path: Path):
-    """
-    Reads an NDJSON file.
-    Each line is one JSON/FHIR resource.
-    """
+    """Read an NDJSON file into a list of FHIR resources."""
     resources = []
 
     if not file_path.exists():
@@ -15,7 +13,6 @@ def load_ndjson(file_path: Path):
     with open(file_path, "r", encoding="utf-8") as file:
         for line_number, line in enumerate(file, start=1):
             line = line.strip()
-
             if not line:
                 continue
 
@@ -28,49 +25,50 @@ def load_ndjson(file_path: Path):
 
 
 def get_reference_id(reference_value):
-    """
-    Converts:
-        Patient/123 -> 123
-        Encounter/abc -> abc
-    """
+    """Convert FHIR references such as ``Patient/123`` to ``123``."""
     if not reference_value:
         return None
 
     if "/" in reference_value:
-        return reference_value.split("/")[-1]
+        return reference_value.rstrip("/").split("/")[-1]
 
     return reference_value
 
 
 def get_subject_patient_id(resource):
-    """
-    Gets patient id from resource['subject']['reference'].
-    """
     subject = resource.get("subject", {})
-    reference = subject.get("reference")
-    return get_reference_id(reference)
+    return get_reference_id(subject.get("reference"))
 
 
 def get_encounter_id(resource):
     """
-    Gets encounter id from resource['encounter']['reference'].
+    Return the encounter referenced by a resource.
+
+    Most resources use ``encounter``. MIMIC MedicationAdministration resources
+    use ``context`` instead, so both are supported.
     """
-    encounter = resource.get("encounter", {})
-    reference = encounter.get("reference")
-    return get_reference_id(reference)
+    encounter = resource.get("encounter")
+    if isinstance(encounter, dict):
+        encounter_id = get_reference_id(encounter.get("reference"))
+        if encounter_id:
+            return encounter_id
+
+    context = resource.get("context")
+    if isinstance(context, dict):
+        return get_reference_id(context.get("reference"))
+
+    return None
 
 
 def parse_datetime(value):
-    """
-    Parses FHIR datetime safely.
-    """
+    """Parse a FHIR date/dateTime value safely."""
     if not value:
         return None
 
     try:
-        value = value.replace("Z", "+00:00")
+        value = str(value).replace("Z", "+00:00")
         return datetime.fromisoformat(value)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 
@@ -85,66 +83,96 @@ def get_period_end(resource):
 
 
 def get_observation_time(resource):
-    """
-    Observation time can be stored in different FHIR fields.
-    """
+    """Return the clinically relevant time of a FHIR Observation."""
     if "effectiveDateTime" in resource:
         return parse_datetime(resource.get("effectiveDateTime"))
 
+    effective_period = resource.get("effectivePeriod")
+    if isinstance(effective_period, dict):
+        parsed = parse_datetime(effective_period.get("start"))
+        if parsed:
+            return parsed
+
     if "issued" in resource:
         return parse_datetime(resource.get("issued"))
-
-    effective_period = resource.get("effectivePeriod", {})
-    if effective_period:
-        return parse_datetime(effective_period.get("start"))
 
     return None
 
 
 def get_numeric_value(resource):
     """
-    Gets numeric value from FHIR Observation.
+    Backwards-compatible numeric extractor.
+
+    New feature code should prefer ``get_quantity`` when unit information
+    matters. This helper intentionally keeps the original simple behavior for
+    callers that only need a number.
     """
-    if "valueQuantity" in resource:
-        value = resource["valueQuantity"].get("value")
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
+    quantity = get_quantity(resource)
+    if quantity is not None:
+        return quantity["value"]
 
-    if "valueInteger" in resource:
-        try:
-            return float(resource["valueInteger"])
-        except (TypeError, ValueError):
-            return None
-
-    if "valueDecimal" in resource:
-        try:
-            return float(resource["valueDecimal"])
-        except (TypeError, ValueError):
-            return None
+    for field in ("valueInteger", "valueDecimal"):
+        if field in resource:
+            try:
+                return float(resource[field])
+            except (TypeError, ValueError):
+                return None
 
     return None
 
 
+def get_quantity(resource):
+    """
+    Return a FHIR ``valueQuantity`` without discarding its unit metadata.
+
+    Returns ``None`` when no usable numeric ``valueQuantity`` is present.
+    """
+    value_quantity = resource.get("valueQuantity")
+    if not isinstance(value_quantity, dict):
+        return None
+
+    try:
+        value = float(value_quantity.get("value"))
+    except (TypeError, ValueError):
+        return None
+
+    return {
+        "value": value,
+        "unit": value_quantity.get("unit"),
+        "system": value_quantity.get("system"),
+        "code": value_quantity.get("code"),
+    }
+
+
+def get_observation_codings(resource):
+    """Return all complete coding entries from ``Observation.code``."""
+    code = resource.get("code", {})
+    codings = code.get("coding", []) if isinstance(code, dict) else []
+
+    return [coding for coding in codings if isinstance(coding, dict)]
+
+
+def get_observation_codes(resource):
+    """Return ``(system, code)`` tuples for all Observation codings."""
+    output = []
+    for coding in get_observation_codings(resource):
+        code = coding.get("code")
+        if code:
+            output.append((coding.get("system"), str(code)))
+    return output
+
+
 def get_observation_display(resource):
-    """
-    Gets human-readable name of an Observation.
-    """
     code = resource.get("code", {})
 
-    if code.get("text"):
+    if isinstance(code, dict) and code.get("text"):
         return code["text"]
 
-    codings = code.get("coding", [])
-    if codings:
-        first_coding = codings[0]
-
-        if first_coding.get("display"):
-            return first_coding["display"]
-
-        if first_coding.get("code"):
-            return first_coding["code"]
+    for coding in get_observation_codings(resource):
+        if coding.get("display"):
+            return coding["display"]
+        if coding.get("code"):
+            return str(coding["code"])
 
     return "unknown_observation"
 
@@ -153,20 +181,16 @@ def days_between(start, end):
     if not start or not end:
         return 0.0
 
-    seconds = (end - start).total_seconds()
-    days = seconds / (60 * 60 * 24)
+    days = (end - start).total_seconds() / (60 * 60 * 24)
+    return max(days, 0.0)
 
-    if days < 0:
-        return 0.0
-
-    return days
 
 def get_event_time(resource):
     """
-    Gets a clinically relevant event timestamp from common FHIR fields.
+    Return a clinically relevant event timestamp from common FHIR fields.
 
-    Used to prevent leakage:
-    if an event has no timestamp, we do not use it as a first-24h feature.
+    Events without a usable timestamp are intentionally excluded from
+    first-24-hour features rather than being assigned an invented time.
     """
     direct_datetime_fields = [
         "effectiveDateTime",
@@ -195,10 +219,8 @@ def get_event_time(resource):
 
     for field in period_fields:
         period = resource.get(field)
-
         if isinstance(period, dict):
             parsed = parse_datetime(period.get("start"))
-
             if parsed:
                 return parsed
 
@@ -206,18 +228,12 @@ def get_event_time(resource):
 
 
 def is_within_first_24h(patient_id, event_time, patient_first_start):
-    """
-    Returns True only if the event is known to be inside the first 24h.
-    Missing timestamps are treated as unsafe and excluded.
-    """
     if event_time is None:
         return False
 
     first_start = patient_first_start.get(patient_id)
-
     if first_start is None:
         return False
 
     first_end = first_start + timedelta(hours=24)
-
     return first_start <= event_time <= first_end
